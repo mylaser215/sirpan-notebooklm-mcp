@@ -5,6 +5,16 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.20] - 2026-03-04
+
+### Fixed
+- **Type errors, thread safety, and silent exceptions (PR #74)**
+  - Added Double-Checked Locking (`threading.Lock`) for thread-safe client initialization in MCP tools.
+  - Surfaced previously swallowed exceptions for better debug visibility via `logger.debug()`.
+  - Fixed multiple type annotations (`str = None` -> `str | None = None`) across the codebase.
+  - Replaced unreachable code with explicit `ValidationError` throwing to ensure strict type checking completeness.
+  - Thanks to **@adlewis82** for the excellent cleanup and safety improvements!
+
 ## [0.3.19] - 2026-03-02
 
 ### Fixed
