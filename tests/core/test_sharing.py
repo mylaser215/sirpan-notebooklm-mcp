@@ -25,6 +25,7 @@ def test_sharing_mixin_has_methods():
         'get_share_status',
         'set_public_access',
         'add_collaborator',
+        'add_collaborators_bulk',
     ]
     
     for method_name in expected_methods:
@@ -79,3 +80,53 @@ def test_add_collaborator_uses_correct_rpc():
             call_args = mock_rpc.call_args
             assert call_args[0][0] == "QDyure"  # RPC_SHARE_NOTEBOOK
             assert result is True
+
+
+def test_add_collaborators_bulk_uses_correct_rpc():
+    """Test that add_collaborators_bulk calls the correct RPC with multi-email payload."""
+    from notebooklm_tools.core.sharing import SharingMixin
+    
+    with patch.object(SharingMixin, '_refresh_auth_tokens'):
+        with patch.object(SharingMixin, '_call_rpc') as mock_rpc:
+            mock_rpc.return_value = []
+            
+            mixin = SharingMixin(cookies={"test": "cookie"}, csrf_token="test")
+            recipients = [
+                {"email": "alice@example.com", "role": "viewer"},
+                {"email": "bob@example.com", "role": "editor"},
+            ]
+            result = mixin.add_collaborators_bulk("notebook_id_123", recipients)
+            
+            mock_rpc.assert_called_once()
+            call_args = mock_rpc.call_args
+            assert call_args[0][0] == "QDyure"  # RPC_SHARE_NOTEBOOK
+            
+            # Verify the multi-email array structure
+            params = call_args[0][1]
+            email_items = params[0][0][1]  # [[email, None, role_code], ...]
+            assert len(email_items) == 2
+            assert email_items[0][0] == "alice@example.com"
+            assert email_items[0][2] == 3  # SHARE_ROLE_VIEWER
+            assert email_items[1][0] == "bob@example.com"
+            assert email_items[1][2] == 2  # SHARE_ROLE_EDITOR
+            assert result is True
+
+
+def test_add_collaborators_bulk_empty_recipients():
+    """Test that add_collaborators_bulk raises ValueError for empty list."""
+    from notebooklm_tools.core.sharing import SharingMixin
+    
+    with patch.object(SharingMixin, '_refresh_auth_tokens'):
+        mixin = SharingMixin(cookies={"test": "cookie"}, csrf_token="test")
+        with pytest.raises(ValueError, match="Recipients list cannot be empty"):
+            mixin.add_collaborators_bulk("notebook_id_123", [])
+
+
+def test_add_collaborators_bulk_rejects_owner_role():
+    """Test that add_collaborators_bulk raises ValueError for owner role."""
+    from notebooklm_tools.core.sharing import SharingMixin
+    
+    with patch.object(SharingMixin, '_refresh_auth_tokens'):
+        mixin = SharingMixin(cookies={"test": "cookie"}, csrf_token="test")
+        with pytest.raises(ValueError, match="Cannot add collaborator"):
+            mixin.add_collaborators_bulk("notebook_id_123", [{"email": "a@b.com", "role": "owner"}])

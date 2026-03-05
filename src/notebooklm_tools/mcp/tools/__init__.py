@@ -23,6 +23,7 @@ from .sharing import (
     notebook_share_status,
     notebook_share_public,
     notebook_share_invite,
+    notebook_share_batch,
 )
 from .research import (
     research_start,
@@ -65,10 +66,11 @@ __all__ = [
     "source_delete",
     "source_describe",
     "source_get_content",
-    # Sharing (3)
+    # Sharing (4)
     "notebook_share_status",
     "notebook_share_public",
     "notebook_share_invite",
+    "notebook_share_batch",
     # Research (3)
     "research_start",
     "research_status",

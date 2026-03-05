@@ -8,6 +8,7 @@ from notebooklm_tools.services.sharing import (
     get_share_status,
     set_public_access,
     invite_collaborator,
+    invite_collaborators_bulk,
 )
 from notebooklm_tools.services.errors import ValidationError, ServiceError
 
@@ -161,3 +162,61 @@ class TestInviteCollaborator:
         mock_client.add_collaborator.side_effect = RuntimeError("API error")
         with pytest.raises(ServiceError, match="Failed to invite"):
             invite_collaborator(mock_client, "nb-123", "alice@example.com", "viewer")
+
+
+class TestBulkInviteCollaborators:
+    """Test invite_collaborators_bulk service function."""
+
+    def test_valid_bulk_invite(self, mock_client):
+        mock_client.add_collaborators_bulk.return_value = True
+
+        recipients = [
+            {"email": "alice@example.com", "role": "viewer"},
+            {"email": "bob@example.com", "role": "editor"},
+        ]
+        result = invite_collaborators_bulk(mock_client, "nb-123", recipients)
+
+        assert result["notebook_id"] == "nb-123"
+        assert result["invited_count"] == 2
+        assert len(result["recipients"]) == 2
+        assert result["recipients"][0]["email"] == "alice@example.com"
+        assert result["recipients"][1]["role"] == "editor"
+        assert "2 collaborators" in result["message"]
+
+    def test_default_role_is_viewer(self, mock_client):
+        mock_client.add_collaborators_bulk.return_value = True
+
+        recipients = [{"email": "alice@example.com"}]
+        result = invite_collaborators_bulk(mock_client, "nb-123", recipients)
+
+        assert result["recipients"][0]["role"] == "viewer"
+
+    def test_empty_recipients_raises_validation_error(self, mock_client):
+        with pytest.raises(ValidationError):
+            invite_collaborators_bulk(mock_client, "nb-123", [])
+
+    def test_invalid_role_raises_validation_error(self, mock_client):
+        recipients = [
+            {"email": "alice@example.com", "role": "admin"},
+        ]
+        with pytest.raises(ValidationError, match="Invalid role"):
+            invite_collaborators_bulk(mock_client, "nb-123", recipients)
+
+    def test_empty_email_raises_validation_error(self, mock_client):
+        recipients = [{"email": "", "role": "viewer"}]
+        with pytest.raises(ValidationError, match="Empty email"):
+            invite_collaborators_bulk(mock_client, "nb-123", recipients)
+
+    def test_falsy_result_raises_service_error(self, mock_client):
+        mock_client.add_collaborators_bulk.return_value = None
+
+        recipients = [{"email": "alice@example.com", "role": "viewer"}]
+        with pytest.raises(ServiceError, match="falsy result"):
+            invite_collaborators_bulk(mock_client, "nb-123", recipients)
+
+    def test_api_error_raises_service_error(self, mock_client):
+        mock_client.add_collaborators_bulk.side_effect = RuntimeError("API error")
+
+        recipients = [{"email": "alice@example.com", "role": "viewer"}]
+        with pytest.raises(ServiceError, match="Failed to invite collaborators"):
+            invite_collaborators_bulk(mock_client, "nb-123", recipients)

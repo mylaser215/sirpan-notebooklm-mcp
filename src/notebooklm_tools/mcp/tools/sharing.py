@@ -71,3 +71,35 @@ def notebook_share_invite(
         return {"status": "error", "error": e.user_message}
     except Exception as e:
         return {"status": "error", "error": str(e)}
+
+
+@logged_tool()
+def notebook_share_batch(
+    notebook_id: str,
+    recipients: list[dict],
+    confirm: bool = False,
+) -> dict[str, Any]:
+    """Invite multiple collaborators in a single request.
+
+    Args:
+        notebook_id: Notebook UUID
+        recipients: List of dicts, each with 'email' (str) and optional 'role' (str).
+                    Role defaults to 'viewer'. Example: [{"email": "a@b.com", "role": "editor"}]
+        confirm: Must be True after user approval
+
+    Returns: invited_count, recipients list, and message
+    """
+    if not confirm:
+        return {
+            "status": "confirmation_required",
+            "message": f"About to invite {len(recipients)} collaborators. Set confirm=True to proceed.",
+            "recipients": recipients,
+        }
+    try:
+        client = get_client()
+        result = sharing_service.invite_collaborators_bulk(client, notebook_id, recipients)
+        return {"status": "success", **result}
+    except ServiceError as e:
+        return {"status": "error", "error": e.user_message}
+    except Exception as e:
+        return {"status": "error", "error": str(e)}

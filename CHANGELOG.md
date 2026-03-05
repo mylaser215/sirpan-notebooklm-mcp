@@ -4,10 +4,18 @@ All notable changes to this project will be documented in this file.
 
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
-## [Unreleased / 0.3.21]
+## [0.4.0] - 2026-03-05
+
+### Added
+- **Bulk Sharing (`notebook_share_batch`)** — Invite multiple collaborators to a notebook in a single API call (Issue #73). Supports mixed roles (viewer/editor) per recipient.
+  - Core: `add_collaborators_bulk(notebook_id, recipients)` on `SharingMixin`
+  - Service: `invite_collaborators_bulk(client, notebook_id, recipients)` with upfront validation
+  - MCP: `notebook_share_batch` tool with `recipients` list and `confirm` flag
+  - CLI: `nlm share batch <notebook> "a@gmail.com,b@gmail.com" --role viewer`
+- **10 new unit tests** for bulk sharing (core + services)
 
 ### Fixed
-- **Version mismatch (Patch)** — Bump internal `__version__` string in `__init__.py` to correctly report as `0.3.21` (was omitted in `0.3.20` release).
+- **Version mismatch (Patch)** — Bump internal `__version__` string in `__init__.py` to correctly report version (was omitted in `0.3.20` release).
 
 ## [0.3.20] - 2026-03-04
 

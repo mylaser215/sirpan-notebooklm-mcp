@@ -41,6 +41,20 @@ class InviteResult(TypedDict):
     message: str
 
 
+class RecipientInfo(TypedDict):
+    """Individual recipient in a bulk invite."""
+    email: str
+    role: str
+
+
+class BulkInviteResult(TypedDict):
+    """Result of a bulk collaborator invitation."""
+    notebook_id: str
+    invited_count: int
+    recipients: list[RecipientInfo]
+    message: str
+
+
 def _collaborator_to_dict(c: Collaborator) -> CollaboratorInfo:
     """Convert a Collaborator dataclass to a dict."""
     return {
@@ -162,3 +176,66 @@ def invite_collaborator(
         raise
     except Exception as e:
         raise ServiceError(f"Failed to invite collaborator: {e}")
+
+
+def invite_collaborators_bulk(
+    client: NotebookLMClient,
+    notebook_id: str,
+    recipients: list[dict],
+) -> BulkInviteResult:
+    """Invite multiple collaborators in a single API call.
+
+    Args:
+        client: Authenticated NotebookLM client
+        notebook_id: Notebook UUID
+        recipients: List of dicts, each with 'email' (str) and optional 'role' (str).
+                    Role defaults to 'viewer' if not specified.
+
+    Returns:
+        BulkInviteResult with invitation summary
+
+    Raises:
+        ValidationError: If recipients list is empty or any role is invalid
+        ServiceError: If the API call fails
+    """
+    if not recipients:
+        raise ValidationError(
+            "Recipients list is empty.",
+            user_message="You must provide at least one email address.",
+        )
+
+    # Validate all roles upfront before making the API call
+    cleaned_recipients: list[RecipientInfo] = []
+    for recipient in recipients:
+        email = recipient.get("email", "").strip()
+        if not email:
+            raise ValidationError(
+                "Empty email in recipients list.",
+                user_message="Each recipient must have a non-empty email address.",
+            )
+        role = recipient.get("role", "viewer").lower()
+        if role not in ("viewer", "editor"):
+            raise ValidationError(
+                f"Invalid role '{role}' for {email}. Must be 'viewer' or 'editor'.",
+                user_message=f"Role must be 'viewer' or 'editor' (got '{role}' for {email})",
+            )
+        cleaned_recipients.append({"email": email, "role": role})
+
+    try:
+        result = client.add_collaborators_bulk(notebook_id, cleaned_recipients)
+        if result:
+            emails_str = ", ".join(r["email"] for r in cleaned_recipients)
+            return {
+                "notebook_id": notebook_id,
+                "invited_count": len(cleaned_recipients),
+                "recipients": cleaned_recipients,
+                "message": f"Invited {len(cleaned_recipients)} collaborators: {emails_str}",
+            }
+        raise ServiceError(
+            "Bulk invitation returned falsy result",
+            user_message="Bulk invitation may have failed — no confirmation from API.",
+        )
+    except ServiceError:
+        raise
+    except Exception as e:
+        raise ServiceError(f"Failed to invite collaborators: {e}")

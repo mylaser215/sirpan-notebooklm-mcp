@@ -4,6 +4,7 @@ This mixin provides sharing-related operations:
 - get_share_status: Get current collaborators and public access
 - set_public_access: Toggle public link access
 - add_collaborator: Add a collaborator by email
+- add_collaborators_bulk: Add multiple collaborators in a single API call
 """
 
 from .base import BaseClient
@@ -149,4 +150,52 @@ class SharingMixin(BaseClient):
         result = self._call_rpc(self.RPC_SHARE_NOTEBOOK, params)
 
         # Success if result is not None (no error thrown)
+        return result is not None
+
+    def add_collaborators_bulk(
+        self,
+        notebook_id: str,
+        recipients: list[dict],
+        notify: bool = True,
+        message: str = "",
+    ) -> bool:
+        """Add multiple collaborators to a notebook in a single API call.
+
+        Args:
+            notebook_id: The notebook UUID
+            recipients: List of dicts, each with 'email' (str) and 'role' (str).
+                        Role must be 'viewer' or 'editor'.
+            notify: Send email notification (default: True)
+            message: Optional welcome message
+
+        Returns:
+            True if successful
+
+        Raises:
+            ValueError: If any role is invalid or recipients list is empty
+        """
+        if not recipients:
+            raise ValueError("Recipients list cannot be empty")
+
+        # Build the multi-email array: [[email1, None, role_code1], [email2, None, role_code2], ...]
+        email_items = []
+        for recipient in recipients:
+            email = recipient["email"]
+            role = recipient.get("role", "viewer")
+            role_code = constants.SHARE_ROLES.get_code(role)
+            if role_code == constants.SHARE_ROLE_OWNER:
+                raise ValueError(f"Cannot add collaborator '{email}' as owner")
+            email_items.append([email, None, role_code])
+
+        notify_flag = 0 if notify else 1  # 0 = notify, 1 = don't notify
+
+        params = [
+            [[notebook_id, email_items, None, [notify_flag, message]]],
+            1,
+            None,
+            [2]
+        ]
+
+        result = self._call_rpc(self.RPC_SHARE_NOTEBOOK, params)
+
         return result is not None
