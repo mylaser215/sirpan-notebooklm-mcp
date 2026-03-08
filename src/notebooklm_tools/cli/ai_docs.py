@@ -616,7 +616,7 @@ nlm skill show                              # Display skill content
 - `antigravity` - Antigravity agent framework (`~/.gemini/antigravity/skills/nlm-skill/`)
 - `cline` - Cline CLI terminal agent (`~/.cline/skills/nlm-skill/`)
 - `openclaw` - OpenClaw AI agent framework (`~/.openclaw/workspace/skills/nlm-skill/`)
-- `codex` - Codex AI assistant (appends to `~/.codex/AGENTS.md`)
+- `codex` - Codex AI assistant (`~/.agents/skills/nlm-skill/`)
 - `other` - Export all formats to `./nlm-skill-export/` for manual installation
 
 **Installation Levels:**
@@ -646,7 +646,7 @@ nlm skill show | head -50
 - `SKILL.md` - Main skill file with NotebookLM CLI/MCP documentation
 - `references/` - Additional documentation (command_reference.md, troubleshooting.md, workflows.md)
 
-For Codex, it appends a compact section to AGENTS.md with markers for easy removal.
+For Codex, it installs to `~/.agents/skills/nlm-skill/SKILL.md` per official Codex docs.
 
 **Note:** If the parent directory doesn't exist (e.g., `~/.claude/` for Claude Code), the installer will prompt you to either create it, switch to project-level installation, or cancel.
 
@@ -706,8 +706,11 @@ nlm setup add cursor                    # Add to Cursor config
 nlm setup add windsurf                  # Add to Windsurf config
 nlm setup add cline                     # Add to Cline CLI config
 nlm setup add antigravity               # Add to Antigravity config
+nlm setup add codex                     # Add to Codex CLI (via codex mcp add)
 nlm setup add json                      # Generate JSON config for any tool (interactive)
+nlm setup add all                       # Scan system & configure all detected tools
 nlm setup remove <client>               # Remove MCP from client
+nlm setup remove all                    # Remove MCP from ALL configured tools (with confirmation)
 ```
 
 **Supported Clients:** claude-code, claude-desktop, gemini, cursor, windsurf, cline, antigravity, codex
