@@ -62,6 +62,12 @@ TOOL_CONFIGS = {
         "format": "skill.md",
         "description": "OpenClaw AI agent framework",
     },
+    "cc-claw": {
+        "user": Path.home() / ".cc-claw/workspace/skills/nlm-skill",
+        "project": Path(".cc-claw/workspace/skills/nlm-skill"),
+        "format": "skill.md",
+        "description": "CC-Claw AI agent framework",
+    },
     "other": {
         "project": Path("./nlm-skill-export"),
         "format": "all",
@@ -347,7 +353,7 @@ Instead of manual copying, you can use:
 nlm skill install <tool>
 ```
 
-Where `<tool>` is: claude-code, cursor, agents, opencode, antigravity, cline, openclaw.
+Where `<tool>` is: claude-code, cursor, agents, opencode, antigravity, cline, openclaw, cc-claw.
 
 > **Note:** `agents` replaces the old `gemini-cli` and `codex` entries. The `.agents/skills/`
 > path is the cross-tool compatible alias supported by Gemini CLI (v0.33.1+), Codex, and others.
