@@ -427,7 +427,7 @@ def delete_source_verb(
     profile: Optional[str] = typer.Option(None, "--profile", "-p", help="Profile to use"),
 ) -> None:
     """Delete a source from notebook."""
-    delete_source(source_id=source, confirm=confirm, profile=profile)
+    delete_source(source_ids=[source], confirm=confirm, profile=profile)
 
 
 @delete_app.command("artifact")

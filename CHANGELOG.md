@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.4] - 2026-03-22
+
+### Fixed
+- **Verb-style `nlm delete source` TypeError (Issue #104)** — `nlm delete source <id> --confirm` was crashing with `TypeError: delete_source() got an unexpected keyword argument 'source_id'`. The verb-style CLI layer in `verbs.py` was passing `source_id=source` (singular string) but the underlying function expects `source_ids` (a list). Fixed the parameter name and wrapped the value in a list. The noun-style `nlm source delete` was unaffected. Thanks to **@Le-Yann** for the detailed bug report and root cause analysis!
+
 ## [0.5.3] - 2026-03-22
 
 ### Improved
