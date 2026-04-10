@@ -858,7 +858,7 @@ wheels = [
 
 [[package]]
 name = "notebooklm-mcp-cli"
-version = "0.5.18"
+version = "0.5.19"
 source = { editable = "." }
 dependencies = [
     { name = "fastmcp" },
@@ -881,7 +881,7 @@ dev = [
 
 [package.metadata]
 requires-dist = [
-    { name = "fastmcp", specifier = ">=0.1.0,<3.0" },
+    { name = "fastmcp", specifier = ">=2.0.0,<4.0" },
     { name = "httpx", specifier = ">=0.27.0,<1.0" },
     { name = "platformdirs", specifier = ">=4.0.0,<5.0" },
     { name = "pydantic", specifier = ">=2.0.0,<3.0" },

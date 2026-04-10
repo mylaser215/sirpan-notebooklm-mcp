@@ -5,6 +5,18 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.5.20] - 2026-04-10
+
+### Fixed
+- **`nlm create infographic` crash when `--style` not specified (Issue #142)** — The verb-first route was missing the `--style` option entirely, causing a `TypeError` on invocation. Fixed alongside 12 other missing parameters across verb-first wrappers.
+- **Multiple verb-first commands missing parameters** — The verb-first CLI route (`nlm create`, `nlm add`, `nlm describe`, `nlm query`, `nlm delete`) was missing 13 parameters that existed on the noun-first route: `--focus` on `nlm create quiz` and `nlm create flashcards`; `--wait` and `--wait-timeout` on `nlm add url`, `nlm add text`, and `nlm add drive`; `--auto-import` on `nlm research start`; `--format` on `nlm download slides`; `--json` on `nlm describe notebook`, `nlm query notebook`, and `nlm source content`; and `--confirm` on `nlm delete alias`.
+
+### Changed
+- **Widened `fastmcp` dependency to `>=2.0.0,<4.0` (Issue #141)** — The previous upper bound (`<3.0`) caused a startup crash when `fakeredis 2.35.0` was installed alongside `fastmcp 2.x`. Widening to `<4.0` resolves the incompatibility and allows users to use newer FastMCP releases without version conflicts.
+
+### Added
+- **Parameter parity test (`tests/cli/test_verbs_parity.py`)** — Automatically compares every verb-first wrapper in `cli/commands/verbs.py` against its target function to detect missing parameters. CI will now fail if a verb wrapper drifts out of sync with its noun-first counterpart.
+
 ## [0.5.19] - 2026-04-09
 
 ### Added
