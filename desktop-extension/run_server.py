@@ -71,10 +71,18 @@ def main() -> None:
         )
         sys.exit(1)
 
-    # Run the MCP server
+    # Run the MCP server — explicit stdio passthrough is critical because
+    # Claude Desktop communicates with MCP servers via stdin/stdout JSON-RPC.
     cmd = [uvx, "--from", "notebooklm-mcp-cli", "notebooklm-mcp", *sys.argv[1:]]
     try:
-        sys.exit(subprocess.run(cmd, check=False).returncode)
+        result = subprocess.run(
+            cmd,
+            stdin=sys.stdin,
+            stdout=sys.stdout,
+            stderr=sys.stderr,
+            check=False,
+        )
+        sys.exit(result.returncode)
     except KeyboardInterrupt:
         sys.exit(130)
 
