@@ -10,7 +10,8 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.11"
 authors = [
-    { name = "Jacob Ben-David" }
+    { name = "Jacob Ben-David" },
+    { name = "SIR-PAN", email = "superlee215@gmail.com" }
 ]
 keywords = ["notebooklm", "mcp", "cli", "google", "ai", "research", "podcast"]
 classifiers = [
