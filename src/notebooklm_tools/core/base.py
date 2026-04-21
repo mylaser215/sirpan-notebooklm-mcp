@@ -8,6 +8,7 @@ operations (notebooks, sources, studio, etc.) are provided by mixin classes.
 Internal API. See CLAUDE.md for full documentation.
 """
 
+import concurrent.futures
 import json
 import logging
 import os
@@ -23,7 +24,7 @@ from notebooklm_tools.utils.config import get_base_url
 
 from . import constants
 from .data_types import ConversationTurn
-from .errors import ClientAuthenticationError as AuthenticationError
+from .errors import AuthRecoveryInProgress, ClientAuthenticationError as AuthenticationError
 from .errors import RPCError
 from .retry import DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY, DEFAULT_MAX_RETRIES, is_retryable_error
 from .utils import (
@@ -303,6 +304,10 @@ class BaseClient:
         # _source_rpc_version, csrf_token, _session_id, cookies.
         # It is never held during network I/O.
         self._state_lock = threading.Lock()
+
+        # Background headless auth (Layer 3 non-blocking)
+        self._headless_auth_future: concurrent.futures.Future | None = None
+        self._headless_auth_lock = threading.Lock()
 
         # Only refresh CSRF token if not provided - tokens actually last hours/days, not minutes
         # The retry logic in _call_rpc() handles expired tokens gracefully
@@ -701,10 +706,15 @@ class BaseClient:
                 pass
 
         # Layer 2 & 3: Reload from disk or run headless auth (deep retry)
-        if not _deep_retry and self._try_reload_or_headless_auth():
-            with self._state_lock:
-                self._client = None
-            return self._call_rpc(rpc_id, params, path, timeout, _retry=True, _deep_retry=True)
+        # AuthRecoveryInProgress propagates up — Layer 3 runs in background thread.
+        if not _deep_retry:
+            try:
+                if self._try_reload_or_headless_auth():
+                    with self._state_lock:
+                        self._client = None
+                    return self._call_rpc(rpc_id, params, path, timeout, _retry=True, _deep_retry=True)
+            except AuthRecoveryInProgress:
+                raise  # Let it propagate to tool handler
 
         # All recovery attempts failed
         raise AuthenticationError(
@@ -825,37 +835,62 @@ class BaseClient:
         """Try to recover authentication by reloading from disk or running headless auth.
 
         Returns True if new valid tokens were obtained, False otherwise.
+        Raises AuthRecoveryInProgress if Layer 3 was kicked off in background.
         """
         from .auth import load_cached_tokens
+        from .errors import AuthRecoveryInProgress
 
         # Layer 2: Reload cookies from disk (profile or legacy auth.json).
-        # load_cached_tokens() checks the default profile first, then falls
-        # back to the legacy auth.json file.  We no longer gate on
-        # auth.json existence so that users who only have profile-based
-        # credentials (from `nlm login`) are not skipped.
         cached = load_cached_tokens()
         if cached and cached.cookies:
-            # Always reload from disk when auth fails - current tokens are known-bad
-            # The cached tokens may be fresher (user ran nlm login)
-            # or the same, but worth retrying with a fresh CSRF token extraction
             with self._state_lock:
                 self.cookies = cached.cookies
                 self.csrf_token = ""  # Force re-extraction of CSRF token
                 self._session_id = ""  # Force re-extraction of session ID
             return True
 
-        # Try headless auth if Chrome profile exists
-        try:
-            from notebooklm_tools.utils.cdp import run_headless_auth
+        # Layer 3: Non-blocking headless auth via background thread.
+        # Chrome headless takes 8-15s — blocking here causes FastMCP
+        # double-response crashes (AssertionError: Request already responded to).
+        with self._headless_auth_lock:
+            # Check if a previous background auth already completed
+            if self._headless_auth_future is not None and self._headless_auth_future.done():
+                try:
+                    tokens = self._headless_auth_future.result()
+                    if tokens:
+                        with self._state_lock:
+                            self.cookies = tokens.cookies
+                            self.csrf_token = tokens.csrf_token
+                            self._session_id = tokens.session_id
+                        self._headless_auth_future = None
+                        return True
+                    else:
+                        self._headless_auth_future = None
+                        return False
+                except Exception as e:
+                    logger.debug(f"Background headless auth failed: {e}")
+                    self._headless_auth_future = None
+                    return False
 
-            tokens = run_headless_auth()
-            if tokens:
-                with self._state_lock:
-                    self.cookies = tokens.cookies
-                    self.csrf_token = tokens.csrf_token
-                    self._session_id = tokens.session_id
-                return True
-        except Exception as e:
-            logger.debug(f"Headless auth failed: {e}")
+            # If already in progress, tell caller to wait
+            if self._headless_auth_future is not None:
+                raise AuthRecoveryInProgress()
+
+            # Kick off headless auth in background
+            try:
+                from notebooklm_tools.utils.cdp import has_chrome_profile, run_headless_auth
+
+                if not has_chrome_profile("default"):
+                    return False
+                executor = concurrent.futures.ThreadPoolExecutor(
+                    max_workers=1, thread_name_prefix="nlm-headless-auth",
+                )
+                self._headless_auth_future = executor.submit(run_headless_auth)
+                executor.shutdown(wait=False)  # Don't block; let thread run
+                raise AuthRecoveryInProgress()
+            except AuthRecoveryInProgress:
+                raise
+            except Exception as e:
+                logger.debug(f"Failed to start headless auth: {e}")
 
         return False

@@ -106,6 +106,23 @@ class ClientAuthenticationError(Exception):
     pass
 
 
+class AuthRecoveryInProgress(NotebookLMError):
+    """Raised when Layer 3 headless auth has been kicked off in background.
+
+    Tool handlers should catch this and return a user-friendly retry message
+    instead of blocking the worker thread (which causes double-response crashes).
+    """
+
+    def __init__(
+        self,
+        message: str = (
+            "Authentication recovery in progress (headless auth). "
+            "Please retry in 15-20 seconds."
+        ),
+    ):
+        super().__init__(message)
+
+
 class RPCError(NotebookLMError):
     """Raised when a batchexecute RPC returns a structured error payload.
 

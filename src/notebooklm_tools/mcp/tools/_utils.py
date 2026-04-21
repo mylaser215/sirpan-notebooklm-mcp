@@ -145,6 +145,12 @@ def get_mcp_instance() -> Any:
 _tool_registry: list[tuple[str, Callable[..., Any]]] = []
 
 
+def _get_auth_recovery_class():
+    """Lazy import to avoid circular dependency with core.errors."""
+    from notebooklm_tools.core.errors import AuthRecoveryInProgress
+    return AuthRecoveryInProgress
+
+
 def logged_tool() -> Callable[[Callable[P, Any]], Callable[P, Any]]:
     """Decorator that adds MCP request/response logging to a tool.
 
@@ -152,6 +158,9 @@ def logged_tool() -> Callable[[Callable[P, Any]], Callable[P, Any]]:
     registration via ``register_all_tools()`` rather than being registered
     immediately when decorated. Supports both synchronous and asynchronous
     functions.
+
+    Also catches AuthRecoveryInProgress from Layer 3 headless auth to prevent
+    blocking the worker thread (which causes MCP session double-response crashes).
     """
 
     def decorator(func: Callable[P, R]) -> Callable[P, R]:
@@ -167,7 +176,14 @@ def logged_tool() -> Callable[[Callable[P, Any]], Callable[P, Any]]:
                     params = _sanitize_params({k: v for k, v in kwargs.items() if v is not None})
                     mcp_logger.debug(f"MCP Request: {tool_name}({json.dumps(params, default=str)})")
 
-                result: Any = await async_func(*args, **kwargs)
+                try:
+                    result: Any = await async_func(*args, **kwargs)
+                except _get_auth_recovery_class():
+                    result = error_result(
+                        "NLM authentication token expired. Background renewal started via headless Chrome.",
+                        hint="Please retry this tool call in 15-20 seconds. No manual action needed.",
+                        status="auth_recovery_in_progress",
+                    )
 
                 if mcp_logger.isEnabledFor(logging.DEBUG):
                     result_str = json.dumps(result, default=str)
@@ -188,7 +204,14 @@ def logged_tool() -> Callable[[Callable[P, Any]], Callable[P, Any]]:
                     params = _sanitize_params({k: v for k, v in kwargs.items() if v is not None})
                     mcp_logger.debug(f"MCP Request: {tool_name}({json.dumps(params, default=str)})")
 
-                result: R = sync_func(*args, **kwargs)
+                try:
+                    result: R = sync_func(*args, **kwargs)
+                except _get_auth_recovery_class():
+                    result = cast(R, error_result(
+                        "NLM authentication token expired. Background renewal started via headless Chrome.",
+                        hint="Please retry this tool call in 15-20 seconds. No manual action needed.",
+                        status="auth_recovery_in_progress",
+                    ))
 
                 if mcp_logger.isEnabledFor(logging.DEBUG):
                     result_str = json.dumps(result, default=str)
