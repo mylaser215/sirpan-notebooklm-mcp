@@ -221,3 +221,180 @@ class TestDeleteSourceRouting:
                 assert args[0] == NotebookLMClient.RPC_DELETE_SOURCE
                 assert args[1] == [[["a"], ["b"], ["c"]], [2]]
                 assert result is True
+
+
+class TestRenameSourceRouting:
+    """Type-aware routing for rename_source.
+
+    Generated_text sources are NotebookLM 'Note' objects and require
+    RPC cYAfTb (update_note title-only) instead of b7Wfje (rename_source).
+    """
+
+    def test_rename_source_routes_generated_text_to_update_note(self):
+        from notebooklm_tools.core.client import NotebookLMClient
+        from notebooklm_tools.core.constants import SOURCE_TYPE_GENERATED_TEXT
+
+        with patch.object(NotebookLMClient, "_refresh_auth_tokens"):  # noqa: SIM117
+            with patch.object(NotebookLMClient, "update_note") as mock_update:
+                with patch.object(NotebookLMClient, "_call_rpc") as mock_rpc:
+                    mock_update.return_value = {
+                        "id": "note_id",
+                        "title": "New Title",
+                        "content": "old body",
+                    }
+                    client = NotebookLMClient(cookies={"t": "c"}, csrf_token="t")
+
+                    result = client.rename_source(
+                        "nb_id",
+                        "note_id",
+                        "New Title",
+                        source_type=SOURCE_TYPE_GENERATED_TEXT,
+                    )
+
+                    mock_update.assert_called_once_with(
+                        "note_id", title="New Title", notebook_id="nb_id"
+                    )
+                    mock_rpc.assert_not_called()
+                    assert result == {"id": "note_id", "title": "New Title"}
+
+    def test_rename_source_regular_uses_b7wfje(self):
+        from notebooklm_tools.core.client import NotebookLMClient
+        from notebooklm_tools.core.constants import SOURCE_TYPE_PASTED_TEXT
+
+        with patch.object(NotebookLMClient, "_refresh_auth_tokens"):  # noqa: SIM117
+            with patch.object(NotebookLMClient, "update_note") as mock_update:
+                with patch.object(NotebookLMClient, "_call_rpc") as mock_rpc:
+                    mock_rpc.return_value = [[["src_id"], "Renamed"]]
+                    client = NotebookLMClient(cookies={"t": "c"}, csrf_token="t")
+
+                    result = client.rename_source(
+                        "nb_id",
+                        "src_id",
+                        "Renamed",
+                        source_type=SOURCE_TYPE_PASTED_TEXT,
+                    )
+
+                    mock_update.assert_not_called()
+                    mock_rpc.assert_called_once()
+                    args = mock_rpc.call_args[0]
+                    assert args[0] == NotebookLMClient.RPC_RENAME_SOURCE
+                    assert result == {"id": "src_id", "title": "Renamed"}
+
+    def test_rename_source_no_source_type_uses_legacy(self):
+        """Backward compat: no source_type → legacy b7Wfje."""
+        from notebooklm_tools.core.client import NotebookLMClient
+
+        with patch.object(NotebookLMClient, "_refresh_auth_tokens"):  # noqa: SIM117
+            with patch.object(NotebookLMClient, "update_note") as mock_update:
+                with patch.object(NotebookLMClient, "_call_rpc") as mock_rpc:
+                    mock_rpc.return_value = [[["src_id"], "T"]]
+                    client = NotebookLMClient(cookies={"t": "c"}, csrf_token="t")
+
+                    client.rename_source("nb_id", "src_id", "T")
+
+                    mock_update.assert_not_called()
+                    mock_rpc.assert_called_once()
+
+
+class TestGetSourceGuideRouting:
+    """Type-aware routing for get_source_guide. Note fallback returns
+    list_notes content as the 'summary' (no per-note summary RPC exists)."""
+
+    def test_get_source_guide_routes_generated_text_to_list_notes(self):
+        from notebooklm_tools.core.client import NotebookLMClient
+        from notebooklm_tools.core.constants import SOURCE_TYPE_GENERATED_TEXT
+
+        with patch.object(NotebookLMClient, "_refresh_auth_tokens"):  # noqa: SIM117
+            with patch.object(NotebookLMClient, "list_notes") as mock_list:
+                with patch.object(NotebookLMClient, "_call_rpc") as mock_rpc:
+                    mock_list.return_value = [
+                        {"id": "other_id", "title": "Other", "content": "x"},
+                        {"id": "note_id", "title": "Note", "content": "Note body."},
+                    ]
+                    client = NotebookLMClient(cookies={"t": "c"}, csrf_token="t")
+
+                    result = client.get_source_guide(
+                        "note_id",
+                        notebook_id="nb_id",
+                        source_type=SOURCE_TYPE_GENERATED_TEXT,
+                    )
+
+                    mock_list.assert_called_once_with("nb_id")
+                    mock_rpc.assert_not_called()
+                    assert result == {"summary": "Note body.", "keywords": []}
+
+    def test_get_source_guide_regular_uses_tr032e(self):
+        from notebooklm_tools.core.client import NotebookLMClient
+
+        with patch.object(NotebookLMClient, "_refresh_auth_tokens"):  # noqa: SIM117
+            with patch.object(NotebookLMClient, "list_notes") as mock_list:
+                with patch.object(NotebookLMClient, "_call_rpc") as mock_rpc:
+                    mock_rpc.return_value = []
+                    client = NotebookLMClient(cookies={"t": "c"}, csrf_token="t")
+
+                    client.get_source_guide("src_id")
+
+                    mock_list.assert_not_called()
+                    mock_rpc.assert_called_once()
+                    args = mock_rpc.call_args[0]
+                    assert args[0] == NotebookLMClient.RPC_GET_SOURCE_GUIDE
+
+
+class TestGetSourceFulltextRouting:
+    """Type-aware routing for get_source_fulltext. Note fallback extracts
+    body from list_notes (cFji9 already returns it)."""
+
+    def test_get_source_fulltext_routes_generated_text_to_list_notes(self):
+        from notebooklm_tools.core.client import NotebookLMClient
+        from notebooklm_tools.core.constants import SOURCE_TYPE_GENERATED_TEXT
+
+        with patch.object(NotebookLMClient, "_refresh_auth_tokens"):  # noqa: SIM117
+            with patch.object(NotebookLMClient, "list_notes") as mock_list:
+                with patch.object(NotebookLMClient, "_call_rpc") as mock_rpc:
+                    mock_list.return_value = [
+                        {"id": "note_id", "title": "T", "content": "Hello world."},
+                    ]
+                    client = NotebookLMClient(cookies={"t": "c"}, csrf_token="t")
+
+                    result = client.get_source_fulltext(
+                        "note_id",
+                        notebook_id="nb_id",
+                        source_type=SOURCE_TYPE_GENERATED_TEXT,
+                    )
+
+                    mock_list.assert_called_once_with("nb_id")
+                    mock_rpc.assert_not_called()
+                    assert result == {
+                        "content": "Hello world.",
+                        "title": "T",
+                        "source_type": "generated_text",
+                        "url": None,
+                        "char_count": 12,
+                    }
+
+    def test_get_source_fulltext_regular_uses_hizojc(self):
+        from notebooklm_tools.core.client import NotebookLMClient
+
+        with patch.object(NotebookLMClient, "_refresh_auth_tokens"):  # noqa: SIM117
+            with patch.object(NotebookLMClient, "list_notes") as mock_list:
+                with patch.object(NotebookLMClient, "_call_rpc") as mock_rpc:
+                    mock_rpc.return_value = []
+                    client = NotebookLMClient(cookies={"t": "c"}, csrf_token="t")
+
+                    client.get_source_fulltext("src_id")
+
+                    mock_list.assert_not_called()
+                    mock_rpc.assert_called_once()
+                    args = mock_rpc.call_args[0]
+                    assert args[0] == NotebookLMClient.RPC_GET_SOURCE
+
+
+def test_is_note_type_helper():
+    """_is_note_type centralizes the Note vs Source distinction."""
+    from notebooklm_tools.core.constants import SOURCE_TYPE_GENERATED_TEXT, SOURCE_TYPE_PASTED_TEXT
+    from notebooklm_tools.core.sources import _is_note_type
+
+    assert _is_note_type(SOURCE_TYPE_GENERATED_TEXT) is True
+    assert _is_note_type(SOURCE_TYPE_PASTED_TEXT) is False
+    assert _is_note_type(None) is False
+    assert _is_note_type(0) is False

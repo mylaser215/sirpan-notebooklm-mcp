@@ -47,8 +47,11 @@ def mock_client():
     client.get_source_fulltext.return_value = {
         "content": "Hello world",
         "title": "Test Source",
-        "type": "url",
+        "source_type": "url",
+        "url": None,
+        "char_count": 11,
     }
+    client.rename_source.return_value = {"id": "src-1", "title": "New Title"}
     return client
 
 
@@ -213,7 +216,9 @@ class TestDeleteSource:
 
     def test_success(self, mock_client):
         delete_source(mock_client, "src-1")
-        mock_client.delete_source.assert_called_once_with("src-1")
+        mock_client.delete_source.assert_called_once_with(
+            "src-1", notebook_id=None, source_type=None
+        )
 
     def test_falsy_result_raises(self, mock_client):
         mock_client.delete_source.return_value = False
@@ -370,7 +375,9 @@ class TestDeleteSources:
     def test_batch_delete(self, mock_client):
         mock_client.delete_sources.return_value = True
         delete_sources(mock_client, ["s1", "s2", "s3"])
-        mock_client.delete_sources.assert_called_once_with(["s1", "s2", "s3"])
+        mock_client.delete_sources.assert_called_once_with(
+            ["s1", "s2", "s3"], notebook_id=None
+        )
 
     def test_empty_list_raises(self, mock_client):
         with pytest.raises(ValidationError, match="No source IDs"):
@@ -385,3 +392,148 @@ class TestDeleteSources:
         mock_client.delete_sources.side_effect = RuntimeError("fail")
         with pytest.raises(ServiceError, match="Failed to delete"):
             delete_sources(mock_client, ["s1"])
+
+
+# ──────────────────────────────────────────────────────────────────────────
+# v3: Source-Note 조회·수정 도메인 불일치 — 자동 type 조회 + fallback
+# ──────────────────────────────────────────────────────────────────────────
+
+
+def _client_with(sources=None, notes=None):
+    """Build a MagicMock with predictable list/notes for v3 routing tests."""
+    client = MagicMock()
+    client.get_notebook_sources_with_types.return_value = sources or []
+    client.list_notes.return_value = notes or []
+    return client
+
+
+class TestResolveSourceType:
+    def test_returns_none_without_notebook_id(self):
+        from notebooklm_tools.services.sources import _resolve_source_type
+
+        client = _client_with()
+        assert _resolve_source_type(client, None, "any") is None
+        client.get_notebook_sources_with_types.assert_not_called()
+        client.list_notes.assert_not_called()
+
+    def test_finds_in_sources(self):
+        from notebooklm_tools.services.sources import _resolve_source_type
+
+        client = _client_with(sources=[{"id": "src1", "source_type": 4}])
+        assert _resolve_source_type(client, "nb", "src1") == 4
+
+    def test_falls_back_to_notes(self):
+        from notebooklm_tools.core.constants import SOURCE_TYPE_GENERATED_TEXT
+        from notebooklm_tools.services.sources import _resolve_source_type
+
+        client = _client_with(sources=[], notes=[{"id": "note1"}])
+        assert _resolve_source_type(client, "nb", "note1") == SOURCE_TYPE_GENERATED_TEXT
+
+    def test_returns_none_when_not_found(self):
+        from notebooklm_tools.services.sources import _resolve_source_type
+
+        client = _client_with(sources=[{"id": "other"}], notes=[{"id": "another"}])
+        assert _resolve_source_type(client, "nb", "missing") is None
+
+    def test_swallows_sources_lookup_error(self):
+        from notebooklm_tools.core.constants import SOURCE_TYPE_GENERATED_TEXT
+        from notebooklm_tools.services.sources import _resolve_source_type
+
+        client = MagicMock()
+        client.get_notebook_sources_with_types.side_effect = RuntimeError("boom")
+        client.list_notes.return_value = [{"id": "note1"}]
+        assert _resolve_source_type(client, "nb", "note1") == SOURCE_TYPE_GENERATED_TEXT
+
+
+class TestDescribeSourceRouting:
+    def test_passes_resolved_type_to_client(self):
+        from notebooklm_tools.core.constants import SOURCE_TYPE_GENERATED_TEXT
+
+        client = _client_with(sources=[], notes=[{"id": "note1"}])
+        client.get_source_guide.return_value = {"summary": "S", "keywords": ["k"]}
+
+        result = describe_source(client, "note1", notebook_id="nb")
+
+        client.get_source_guide.assert_called_once_with(
+            "note1", notebook_id="nb", source_type=SOURCE_TYPE_GENERATED_TEXT
+        )
+        assert result == {"summary": "S", "keywords": ["k"]}
+
+    def test_no_notebook_id_passes_through(self):
+        client = MagicMock()
+        client.get_source_guide.return_value = {"summary": "S", "keywords": []}
+
+        describe_source(client, "src_id")
+
+        client.get_source_guide.assert_called_once_with(
+            "src_id", notebook_id=None, source_type=None
+        )
+        client.get_notebook_sources_with_types.assert_not_called()
+        client.list_notes.assert_not_called()
+
+
+class TestGetSourceContentRouting:
+    def test_passes_resolved_type_to_client(self):
+        from notebooklm_tools.core.constants import SOURCE_TYPE_GENERATED_TEXT
+
+        client = _client_with(sources=[], notes=[{"id": "note1"}])
+        client.get_source_fulltext.return_value = {
+            "content": "body",
+            "title": "T",
+            "source_type": "generated_text",
+            "url": None,
+            "char_count": 4,
+        }
+
+        result = get_source_content(client, "note1", notebook_id="nb")
+
+        client.get_source_fulltext.assert_called_once_with(
+            "note1", notebook_id="nb", source_type=SOURCE_TYPE_GENERATED_TEXT
+        )
+        assert result["content"] == "body"
+        assert result["source_type"] == "generated_text"
+        assert result["char_count"] == 4
+
+    def test_no_notebook_id_passes_through(self):
+        client = MagicMock()
+        client.get_source_fulltext.return_value = {
+            "content": "body",
+            "title": "T",
+            "source_type": "web_page",
+            "url": None,
+            "char_count": 4,
+        }
+
+        get_source_content(client, "src_id")
+
+        client.get_source_fulltext.assert_called_once_with(
+            "src_id", notebook_id=None, source_type=None
+        )
+
+
+class TestRenameSourceRouting:
+    def test_passes_resolved_type_to_client(self):
+        from notebooklm_tools.core.constants import SOURCE_TYPE_GENERATED_TEXT
+        from notebooklm_tools.services.sources import rename_source as svc_rename
+
+        client = _client_with(sources=[], notes=[{"id": "note1"}])
+        client.rename_source.return_value = {"id": "note1", "title": "New"}
+
+        result = svc_rename(client, "nb", "note1", "New")
+
+        client.rename_source.assert_called_once_with(
+            "nb", "note1", "New", source_type=SOURCE_TYPE_GENERATED_TEXT
+        )
+        assert result == {"source_id": "note1", "title": "New"}
+
+    def test_regular_source_passes_through(self):
+        from notebooklm_tools.services.sources import rename_source as svc_rename
+
+        client = _client_with(sources=[{"id": "src1", "source_type": 4}], notes=[])
+        client.rename_source.return_value = {"id": "src1", "title": "New"}
+
+        svc_rename(client, "nb", "src1", "New")
+
+        client.rename_source.assert_called_once_with(
+            "nb", "src1", "New", source_type=4
+        )

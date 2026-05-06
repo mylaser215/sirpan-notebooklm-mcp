@@ -34,6 +34,17 @@ class _NotebookLookupProtocol(Protocol):
     def get_notebook(self, notebook_id: str) -> Any: ...
 
 
+def _is_note_type(source_type: int | None) -> bool:
+    """Return True for source_type codes that are backed by Note RPCs.
+
+    NotebookLM backend stores generated_text (saved AI responses, mind maps)
+    as 'Note' objects accessed via Note-specific RPCs (cFji9, cYAfTb, AH0mwd)
+    rather than the Source RPCs (hizoJc, b7Wfje, tGMBJ, tr032e). Centralized
+    here so future Note types (e.g. mind_map subtype) can be added in one place.
+    """
+    return source_type == constants.SOURCE_TYPE_GENERATED_TEXT
+
+
 class SourceMixin(BaseClient):
     """Mixin for source management operations.
 
@@ -172,18 +183,38 @@ class SourceMixin(BaseClient):
         return None
 
     def rename_source(
-        self, notebook_id: str, source_id: str, new_title: str
+        self,
+        notebook_id: str,
+        source_id: str,
+        new_title: str,
+        *,
+        source_type: int | None = None,
     ) -> dict[str, Any] | None:
         """Rename a source in a notebook.
+
+        NotebookLM backend manages 'Source' (external) and 'Note' (internal
+        generated_text/mind_map) as separate objects with separate RPCs.
+        Renaming uses `b7Wfje` for Source vs `cYAfTb` (update_note) for Note.
+        When `source_type` is SOURCE_TYPE_GENERATED_TEXT (=8), this method
+        delegates to `update_note` (title-only) so the correct RPC is used.
 
         Args:
             notebook_id: The notebook containing the source
             source_id: The source UUID to rename
             new_title: The new display title
+            source_type: Optional source type code — when 8 (generated_text),
+                routes to update_note RPC
 
         Returns:
             Dict with source_id and title on success, None on failure
         """
+        # Route generated_text to the Note update RPC (cYAfTb, title-only)
+        if _is_note_type(source_type):
+            updated = self.update_note(source_id, title=new_title, notebook_id=notebook_id)
+            if updated:
+                return {"id": updated["id"], "title": updated["title"]}
+            return None
+
         params = [None, [source_id], [[[new_title]]]]
         path = f"/notebook/{notebook_id}"
         result = self._call_rpc(self.RPC_RENAME_SOURCE, params, path)
@@ -225,7 +256,7 @@ class SourceMixin(BaseClient):
             True on success, False on failure
         """
         # Route generated_text to the Note deletion RPC (AH0mwd)
-        if source_type == constants.SOURCE_TYPE_GENERATED_TEXT and notebook_id:
+        if _is_note_type(source_type) and notebook_id:
             return self.delete_note(source_id, notebook_id)
 
         # Standard source deletion via tGMBJ
@@ -266,7 +297,7 @@ class SourceMixin(BaseClient):
             note_ids = [
                 sid
                 for sid in source_ids
-                if type_map.get(sid) == constants.SOURCE_TYPE_GENERATED_TEXT
+                if _is_note_type(type_map.get(sid))
             ]
             regular_ids = [sid for sid in source_ids if sid not in note_ids]
 
@@ -969,8 +1000,40 @@ class SourceMixin(BaseClient):
 
         return result
 
-    def get_source_guide(self, source_id: str) -> dict[str, Any]:
-        """Get AI-generated summary and keywords for a source."""
+    def get_source_guide(
+        self,
+        source_id: str,
+        *,
+        notebook_id: str | None = None,
+        source_type: int | None = None,
+    ) -> dict[str, Any]:
+        """Get AI-generated summary and keywords for a source.
+
+        Source/Note backend split: regular Sources use RPC `tr032e`; Notes
+        (generated_text) have no per-note summary RPC. When `source_type`
+        is SOURCE_TYPE_GENERATED_TEXT (=8) and `notebook_id` is provided,
+        this method falls back to `list_notes` content (the Note's body
+        is its summary in NLM's mental model).
+
+        Args:
+            source_id: The source UUID
+            notebook_id: Optional notebook UUID — required for note routing
+            source_type: Optional source type code — when 8, uses note fallback
+
+        Returns:
+            Dict with summary and keywords
+        """
+        # Note fallback: use list_notes content as the "summary" (no per-note
+        # summary RPC exists; Note body itself serves as the descriptive text)
+        if _is_note_type(source_type) and notebook_id:
+            for note in self.list_notes(notebook_id):
+                if note.get("id") == source_id:
+                    return {
+                        "summary": note.get("content", "") or note.get("preview", ""),
+                        "keywords": [],
+                    }
+            return {"summary": "", "keywords": []}
+
         result = self._call_rpc(self.RPC_GET_SOURCE_GUIDE, [[[[source_id]]]], "/")
         summary = ""
         keywords = []
@@ -991,18 +1054,52 @@ class SourceMixin(BaseClient):
             "keywords": keywords,
         }
 
-    def get_source_fulltext(self, source_id: str) -> dict[str, Any]:
+    def get_source_fulltext(
+        self,
+        source_id: str,
+        *,
+        notebook_id: str | None = None,
+        source_type: int | None = None,
+    ) -> dict[str, Any]:
         """Get the full text content of a source.
 
         Returns the raw text content that was indexed from the source,
         along with metadata like title and source type.
 
+        Source/Note backend split: regular Sources use RPC `hizoJc`; Notes
+        (generated_text) have no per-note get_content RPC — their body is
+        already returned by `list_notes` (cFji9). When `source_type` is
+        SOURCE_TYPE_GENERATED_TEXT (=8) and `notebook_id` is provided, this
+        method falls back to extracting content from `list_notes`.
+
         Args:
             source_id: The source UUID
+            notebook_id: Optional notebook UUID — required for note routing
+            source_type: Optional source type code — when 8, uses note fallback
 
         Returns:
             Dict with content, title, source_type, and char_count
         """
+        # Note fallback: list_notes already returns the note body
+        if _is_note_type(source_type) and notebook_id:
+            for note in self.list_notes(notebook_id):
+                if note.get("id") == source_id:
+                    content = note.get("content", "") or ""
+                    return {
+                        "content": content,
+                        "title": note.get("title", ""),
+                        "source_type": "generated_text",
+                        "url": None,
+                        "char_count": len(content),
+                    }
+            return {
+                "content": "",
+                "title": "",
+                "source_type": "generated_text",
+                "url": None,
+                "char_count": 0,
+            }
+
         # The hizoJc RPC returns source details including full text
         params = [[source_id], [2], [2]]
         result = self._call_rpc(self.RPC_GET_SOURCE, params, "/")

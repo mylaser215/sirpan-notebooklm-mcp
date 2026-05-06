@@ -152,6 +152,10 @@ def source_sync_drive(source_ids: list[str], confirm: bool = False) -> ResultDic
 def source_rename(notebook_id: str, source_id: str, new_title: str) -> ResultDict:
     """Rename a source in a notebook.
 
+    Works for both regular Sources (Source RPC b7Wfje) and generated_text
+    Notes (routed to update_note title-only RPC cYAfTb). Type is auto-detected
+    from notebook_id.
+
     Args:
         notebook_id: Notebook UUID containing the source
         source_id: Source UUID to rename
@@ -226,17 +230,23 @@ def source_delete(
 
 
 @logged_tool()
-def source_describe(source_id: str) -> ResultDict:
+def source_describe(source_id: str, notebook_id: str | None = None) -> ResultDict:
     """Get AI-generated source summary with keyword chips.
+
+    For generated_text sources (saved AI responses, mind maps stored as
+    notebook content), pass `notebook_id` so the call is routed to the
+    correct backend. Without notebook_id the legacy Source-only RPC is
+    used and generated_text describe will fail.
 
     Args:
         source_id: Source UUID
+        notebook_id: Optional notebook UUID — required for generated_text routing
 
     Returns: summary (markdown with **bold** keywords), keywords list
     """
     try:
         client = get_client()
-        result = sources_service.describe_source(client, source_id)
+        result = sources_service.describe_source(client, source_id, notebook_id=notebook_id)
         return {"status": "success", **result}
     except ServiceError as e:
         return error_result(e.user_message, hint=e.hint)
@@ -245,20 +255,25 @@ def source_describe(source_id: str) -> ResultDict:
 
 
 @logged_tool()
-def source_get_content(source_id: str) -> ResultDict:
+def source_get_content(source_id: str, notebook_id: str | None = None) -> ResultDict:
     """Get raw text content of a source (no AI processing).
 
     Returns the original indexed text from PDFs, web pages, pasted text,
     or YouTube transcripts. Much faster than notebook_query for content export.
 
+    For generated_text sources (saved AI responses), pass `notebook_id` so
+    the call returns the note body directly. Without notebook_id the
+    legacy Source-only RPC is used and generated_text content will fail.
+
     Args:
         source_id: Source UUID
+        notebook_id: Optional notebook UUID — required for generated_text routing
 
     Returns: content (str), title (str), source_type (str), char_count (int)
     """
     try:
         client = get_client()
-        result = sources_service.get_source_content(client, source_id)
+        result = sources_service.get_source_content(client, source_id, notebook_id=notebook_id)
         return {"status": "success", **result}
     except ServiceError as e:
         return error_result(e.user_message, hint=e.hint)

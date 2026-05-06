@@ -431,6 +431,10 @@ def rename_source(
 ) -> RenameResult:
     """Rename a source in a notebook.
 
+    NotebookLM internal 'Note' objects (generated_text source_type=8) require
+    a different RPC than regular Sources. The source's type is looked up first
+    and the call is routed accordingly (notes use update_note title-only).
+
     Args:
         client: Authenticated NotebookLM client
         notebook_id: Notebook UUID containing the source
@@ -447,8 +451,12 @@ def rename_source(
     if not new_title or not new_title.strip():
         raise ValidationError("new_title cannot be empty.")
 
+    source_type = _resolve_source_type(client, notebook_id, source_id)
+
     try:
-        result = client.rename_source(notebook_id, source_id, new_title.strip())
+        result = client.rename_source(
+            notebook_id, source_id, new_title.strip(), source_type=source_type
+        )
         if not result:
             raise ServiceError(
                 f"Rename returned no data for source {source_id}",
@@ -465,6 +473,47 @@ def rename_source(
             f"Failed to rename source {source_id}: {e}",
             user_message="Failed to rename source.",
         ) from e
+
+
+def _resolve_source_type(
+    client: NotebookLMClient,
+    notebook_id: str | None,
+    source_id: str,
+) -> int | None:
+    """Look up the backend source_type for a given ID, with sources→notes fallback.
+
+    NotebookLM stores Sources (external docs) and Notes (generated_text/mind_map)
+    as separate object kinds with separate RPCs. Callers that need type-aware
+    routing pass the resolved type to the client method.
+
+    Returns None when notebook_id is missing or lookup fails — callers should
+    treat this as "default Source routing" (preserves backward compatibility).
+    """
+    if not notebook_id:
+        return None
+    try:
+        sources_meta = client.get_notebook_sources_with_types(notebook_id)
+        for s in sources_meta:
+            if s.get("id") == source_id:
+                return s.get("source_type")
+    except Exception:
+        pass
+    # Fallback: Note objects are stored separately and report as generated_text.
+    try:
+        from ..core.constants import SOURCE_TYPE_GENERATED_TEXT
+
+        notes = client.list_notes(notebook_id)
+        if any(n.get("id") == source_id for n in notes):
+            return SOURCE_TYPE_GENERATED_TEXT
+    except Exception:
+        pass
+    return None
+
+
+_NOTE_HINT = (
+    "If this is a generated_text (saved AI response or mind map) source, "
+    "pass notebook_id parameter — type-aware routing requires it."
+)
 
 
 def delete_source(
@@ -486,29 +535,7 @@ def delete_source(
     Raises:
         ServiceError: If deletion fails
     """
-    source_type: int | None = None
-    if notebook_id:
-        try:
-            sources_meta = client.get_notebook_sources_with_types(notebook_id)
-            for s in sources_meta:
-                if s.get("id") == source_id:
-                    source_type = s.get("source_type")
-                    break
-        except Exception:
-            # Type lookup is best-effort; fall back to default routing
-            source_type = None
-
-        # If not found in sources, check notes (Note objects are stored
-        # separately and report as generated_text on the backend).
-        if source_type is None:
-            try:
-                from ..core.constants import SOURCE_TYPE_GENERATED_TEXT
-
-                notes = client.list_notes(notebook_id)
-                if any(n.get("id") == source_id for n in notes):
-                    source_type = SOURCE_TYPE_GENERATED_TEXT
-            except Exception:
-                source_type = None
+    source_type = _resolve_source_type(client, notebook_id, source_id)
 
     try:
         result = client.delete_source(
@@ -517,15 +544,10 @@ def delete_source(
             source_type=source_type,
         )
         if not result:
-            hint = (
-                "If this is a generated_text (saved AI response or mind map) "
-                "source, pass notebook_id parameter — type-aware routing "
-                "requires it."
-            )
             raise ServiceError(
                 f"Delete returned falsy for source {source_id}",
                 user_message="Failed to delete source.",
-                hint=hint if not notebook_id else None,
+                hint=_NOTE_HINT if not notebook_id else None,
             )
     except ServiceError:
         raise
@@ -561,14 +583,10 @@ def delete_sources(
     try:
         result = client.delete_sources(source_ids, notebook_id=notebook_id)
         if not result:
-            hint = (
-                "If any of these are generated_text sources, pass notebook_id "
-                "parameter — type-aware routing requires it."
-            )
             raise ServiceError(
                 f"Bulk delete returned falsy for {len(source_ids)} sources",
                 user_message="Failed to delete sources.",
-                hint=hint if not notebook_id else None,
+                hint=_NOTE_HINT if not notebook_id else None,
             )
     except (ValidationError, ServiceError):
         raise
@@ -582,12 +600,19 @@ def delete_sources(
 def describe_source(
     client: NotebookLMClient,
     source_id: str,
+    notebook_id: str | None = None,
 ) -> DescribeResult:
     """Get AI-generated source summary with keywords.
+
+    NotebookLM internal Note objects (generated_text) have no per-note summary
+    RPC; their body is itself descriptive. When `notebook_id` is provided,
+    the type is looked up; if it's a Note, the note's content is returned as
+    the summary instead of calling the Source-only RPC.
 
     Args:
         client: Authenticated NotebookLM client
         source_id: Source UUID
+        notebook_id: Optional notebook UUID — required for note routing
 
     Returns:
         DescribeResult with summary and keywords
@@ -595,12 +620,17 @@ def describe_source(
     Raises:
         ServiceError: If describe fails
     """
+    source_type = _resolve_source_type(client, notebook_id, source_id)
+
     try:
-        result = client.get_source_guide(source_id)
+        result = client.get_source_guide(
+            source_id, notebook_id=notebook_id, source_type=source_type
+        )
         if not result:
             raise ServiceError(
                 f"No description returned for source {source_id}",
                 user_message="Failed to get source summary.",
+                hint=_NOTE_HINT if not notebook_id else None,
             )
         return {
             "summary": result.get("summary", ""),
@@ -612,18 +642,26 @@ def describe_source(
         raise ServiceError(
             f"Failed to describe source {source_id}: {e}",
             user_message="Failed to get source summary.",
+            hint=_NOTE_HINT if not notebook_id else None,
         ) from e
 
 
 def get_source_content(
     client: NotebookLMClient,
     source_id: str,
+    notebook_id: str | None = None,
 ) -> SourceContentResult:
     """Get raw text content of a source (no AI processing).
+
+    NotebookLM internal Note objects (generated_text) have no per-note
+    get_content RPC — their body is already returned by list_notes. When
+    `notebook_id` is provided and the type is a Note, the note's content
+    is returned directly instead of calling the Source-only RPC.
 
     Args:
         client: Authenticated NotebookLM client
         source_id: Source UUID
+        notebook_id: Optional notebook UUID — required for note routing
 
     Returns:
         SourceContentResult with content, title, type, and char_count
@@ -631,18 +669,23 @@ def get_source_content(
     Raises:
         ServiceError: If content retrieval fails
     """
+    source_type = _resolve_source_type(client, notebook_id, source_id)
+
     try:
-        result = client.get_source_fulltext(source_id)
+        result = client.get_source_fulltext(
+            source_id, notebook_id=notebook_id, source_type=source_type
+        )
         if not result:
             raise ServiceError(
                 f"No content returned for source {source_id}",
                 user_message="Failed to get source content.",
+                hint=_NOTE_HINT if not notebook_id else None,
             )
         content = result.get("content", "")
         return {
             "content": content,
             "title": result.get("title", ""),
-            "source_type": result.get("type", "unknown"),
+            "source_type": result.get("source_type", "unknown"),
             "char_count": len(content),
         }
     except ServiceError:
@@ -651,4 +694,5 @@ def get_source_content(
         raise ServiceError(
             f"Failed to get content for source {source_id}: {e}",
             user_message="Failed to get source content.",
+            hint=_NOTE_HINT if not notebook_id else None,
         ) from e
