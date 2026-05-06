@@ -36,7 +36,15 @@ from .utils import (
 
 # Configure logger (API internals only logged at DEBUG level, usually disabled)
 logger = logging.getLogger("notebooklm_mcp.api")
-logger.setLevel(logging.WARNING)  # Suppress internal API logs by default
+if os.environ.get("NLM_MCP_DEBUG") == "1":
+    logger.setLevel(logging.DEBUG)
+    _nlm_debug_handler = logging.StreamHandler()
+    _nlm_debug_handler.setLevel(logging.DEBUG)
+    _nlm_debug_handler.setFormatter(logging.Formatter("%(asctime)s NLM_DEBUG %(message)s"))
+    logger.addHandler(_nlm_debug_handler)
+    logger.propagate = False
+else:
+    logger.setLevel(logging.WARNING)
 
 # Timeout configuration (seconds)
 DEFAULT_TIMEOUT = 30.0  # Default for most operations

@@ -470,22 +470,62 @@ def rename_source(
 def delete_source(
     client: NotebookLMClient,
     source_id: str,
+    notebook_id: str | None = None,
 ) -> None:
     """Delete a source permanently.
+
+    NotebookLM internal 'Note' objects (generated_text source_type=8) require
+    a different RPC than regular Sources. When `notebook_id` is provided, the
+    source's type is looked up first and the call is routed accordingly.
 
     Args:
         client: Authenticated NotebookLM client
         source_id: Source UUID
+        notebook_id: Optional notebook UUID — required to delete generated_text
 
     Raises:
         ServiceError: If deletion fails
     """
+    source_type: int | None = None
+    if notebook_id:
+        try:
+            sources_meta = client.get_notebook_sources_with_types(notebook_id)
+            for s in sources_meta:
+                if s.get("id") == source_id:
+                    source_type = s.get("source_type")
+                    break
+        except Exception:
+            # Type lookup is best-effort; fall back to default routing
+            source_type = None
+
+        # If not found in sources, check notes (Note objects are stored
+        # separately and report as generated_text on the backend).
+        if source_type is None:
+            try:
+                from ..core.constants import SOURCE_TYPE_GENERATED_TEXT
+
+                notes = client.list_notes(notebook_id)
+                if any(n.get("id") == source_id for n in notes):
+                    source_type = SOURCE_TYPE_GENERATED_TEXT
+            except Exception:
+                source_type = None
+
     try:
-        result = client.delete_source(source_id)
+        result = client.delete_source(
+            source_id,
+            notebook_id=notebook_id,
+            source_type=source_type,
+        )
         if not result:
+            hint = (
+                "If this is a generated_text (saved AI response or mind map) "
+                "source, pass notebook_id parameter — type-aware routing "
+                "requires it."
+            )
             raise ServiceError(
                 f"Delete returned falsy for source {source_id}",
                 user_message="Failed to delete source.",
+                hint=hint if not notebook_id else None,
             )
     except ServiceError:
         raise
@@ -499,12 +539,17 @@ def delete_source(
 def delete_sources(
     client: NotebookLMClient,
     source_ids: list[str],
+    notebook_id: str | None = None,
 ) -> None:
     """Delete multiple sources permanently in a single request.
+
+    When `notebook_id` is provided, type-aware routing splits generated_text
+    entries (Notes) from regular sources and uses the correct RPC for each.
 
     Args:
         client: Authenticated NotebookLM client
         source_ids: List of source UUIDs to delete
+        notebook_id: Optional notebook UUID — enables type-aware routing
 
     Raises:
         ValidationError: If source_ids is empty
@@ -514,11 +559,16 @@ def delete_sources(
         raise ValidationError("No source IDs provided for bulk delete.")
 
     try:
-        result = client.delete_sources(source_ids)
+        result = client.delete_sources(source_ids, notebook_id=notebook_id)
         if not result:
+            hint = (
+                "If any of these are generated_text sources, pass notebook_id "
+                "parameter — type-aware routing requires it."
+            )
             raise ServiceError(
                 f"Bulk delete returned falsy for {len(source_ids)} sources",
                 user_message="Failed to delete sources.",
+                hint=hint if not notebook_id else None,
             )
     except (ValidationError, ServiceError):
         raise

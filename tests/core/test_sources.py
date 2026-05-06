@@ -99,3 +99,125 @@ def test_get_source_guide_uses_call_rpc():
 
             mock_rpc.assert_called_once()
             assert result == {"summary": "", "keywords": []}
+
+
+class TestDeleteSourceRouting:
+    """Type-aware routing for delete_source / delete_sources.
+
+    Generated_text sources are NotebookLM 'Note' objects and require
+    RPC AH0mwd (delete_note) instead of tGMBJ (delete_source).
+    """
+
+    def test_delete_source_routes_generated_text_to_note(self):
+        from notebooklm_tools.core.client import NotebookLMClient
+        from notebooklm_tools.core.constants import SOURCE_TYPE_GENERATED_TEXT
+
+        with patch.object(NotebookLMClient, "_refresh_auth_tokens"):  # noqa: SIM117
+            with patch.object(NotebookLMClient, "delete_note") as mock_delete_note:
+                with patch.object(NotebookLMClient, "_call_rpc") as mock_rpc:
+                    mock_delete_note.return_value = True
+                    client = NotebookLMClient(cookies={"t": "c"}, csrf_token="t")
+
+                    result = client.delete_source(
+                        "src_id",
+                        notebook_id="nb_id",
+                        source_type=SOURCE_TYPE_GENERATED_TEXT,
+                    )
+
+                    mock_delete_note.assert_called_once_with("src_id", "nb_id")
+                    mock_rpc.assert_not_called()
+                    assert result is True
+
+    def test_delete_source_regular_uses_tgmbj(self):
+        from notebooklm_tools.core.client import NotebookLMClient
+        from notebooklm_tools.core.constants import SOURCE_TYPE_PASTED_TEXT
+
+        with patch.object(NotebookLMClient, "_refresh_auth_tokens"):  # noqa: SIM117
+            with patch.object(NotebookLMClient, "delete_note") as mock_delete_note:
+                with patch.object(NotebookLMClient, "_call_rpc") as mock_rpc:
+                    mock_rpc.return_value = []
+                    client = NotebookLMClient(cookies={"t": "c"}, csrf_token="t")
+
+                    result = client.delete_source(
+                        "src_id",
+                        notebook_id="nb_id",
+                        source_type=SOURCE_TYPE_PASTED_TEXT,
+                    )
+
+                    mock_delete_note.assert_not_called()
+                    mock_rpc.assert_called_once()
+                    args = mock_rpc.call_args[0]
+                    assert args[0] == NotebookLMClient.RPC_DELETE_SOURCE
+                    assert args[1] == [[["src_id"]], [2]]
+                    assert result is True
+
+    def test_delete_source_no_notebook_id_uses_legacy(self):
+        """Backward compat: no notebook_id → no routing → legacy tGMBJ."""
+        from notebooklm_tools.core.client import NotebookLMClient
+
+        with patch.object(NotebookLMClient, "_refresh_auth_tokens"):  # noqa: SIM117
+            with patch.object(NotebookLMClient, "delete_note") as mock_delete_note:
+                with patch.object(NotebookLMClient, "_call_rpc") as mock_rpc:
+                    mock_rpc.return_value = []
+                    client = NotebookLMClient(cookies={"t": "c"}, csrf_token="t")
+
+                    result = client.delete_source("src_id")
+
+                    mock_delete_note.assert_not_called()
+                    mock_rpc.assert_called_once()
+                    assert result is True
+
+    def test_delete_sources_batch_splits_by_type(self):
+        """Mixed batch: notes go to delete_note, regular sources to tGMBJ batch."""
+        from notebooklm_tools.core.client import NotebookLMClient
+        from notebooklm_tools.core.constants import (
+            SOURCE_TYPE_GENERATED_TEXT,
+            SOURCE_TYPE_PASTED_TEXT,
+        )
+
+        with patch.object(NotebookLMClient, "_refresh_auth_tokens"):  # noqa: SIM117
+            with patch.object(
+                NotebookLMClient, "get_notebook_sources_with_types"
+            ) as mock_meta:
+                with patch.object(NotebookLMClient, "delete_note") as mock_delete_note:
+                    with patch.object(NotebookLMClient, "_call_rpc") as mock_rpc:
+                        mock_meta.return_value = [
+                            {"id": "note1", "source_type": SOURCE_TYPE_GENERATED_TEXT},
+                            {"id": "src1", "source_type": SOURCE_TYPE_PASTED_TEXT},
+                            {"id": "note2", "source_type": SOURCE_TYPE_GENERATED_TEXT},
+                        ]
+                        mock_delete_note.return_value = True
+                        mock_rpc.return_value = []
+                        client = NotebookLMClient(cookies={"t": "c"}, csrf_token="t")
+
+                        result = client.delete_sources(
+                            ["note1", "src1", "note2"], notebook_id="nb_id"
+                        )
+
+                        # Notes deleted individually via delete_note
+                        assert mock_delete_note.call_count == 2
+                        mock_delete_note.assert_any_call("note1", "nb_id")
+                        mock_delete_note.assert_any_call("note2", "nb_id")
+                        # Regular sources sent as a single batch
+                        mock_rpc.assert_called_once()
+                        args = mock_rpc.call_args[0]
+                        assert args[0] == NotebookLMClient.RPC_DELETE_SOURCE
+                        assert args[1] == [[["src1"]], [2]]
+                        assert result is True
+
+    def test_delete_sources_batch_no_notebook_id_uses_legacy(self):
+        """Backward compat: no notebook_id → single batched tGMBJ call."""
+        from notebooklm_tools.core.client import NotebookLMClient
+
+        with patch.object(NotebookLMClient, "_refresh_auth_tokens"):  # noqa: SIM117
+            with patch.object(NotebookLMClient, "_call_rpc") as mock_rpc:
+                mock_rpc.return_value = []
+                client = NotebookLMClient(cookies={"t": "c"}, csrf_token="t")
+
+                result = client.delete_sources(["a", "b", "c"])
+
+                mock_rpc.assert_called_once()
+                args = mock_rpc.call_args[0]
+                assert args[0] == NotebookLMClient.RPC_DELETE_SOURCE
+                assert args[1] == [[["a"], ["b"], ["c"]], [2]]
+                assert result is True

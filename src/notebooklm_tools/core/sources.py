@@ -196,18 +196,39 @@ class SourceMixin(BaseClient):
                 return {"id": returned_id, "title": returned_title}
         return None
 
-    def delete_source(self, source_id: str) -> bool:
+    def delete_source(
+        self,
+        source_id: str,
+        *,
+        notebook_id: str | None = None,
+        source_type: int | None = None,
+    ) -> bool:
         """Delete a source from a notebook permanently.
 
         WARNING: This action is IRREVERSIBLE. The source will be permanently
         deleted from the notebook.
 
+        NotebookLM backend manages two distinct object kinds: external 'Source'
+        (text/pdf/url/audio/...) and internal 'Note' (generated_text/mind_map).
+        Deletion uses different RPCs (tGMBJ vs AH0mwd). When `source_type` is
+        SOURCE_TYPE_GENERATED_TEXT (=8) and `notebook_id` is provided, this
+        method delegates to `delete_note` so the correct RPC is used.
+
         Args:
             source_id: The source UUID to delete
+            notebook_id: Optional notebook UUID — required for generated_text
+                routing
+            source_type: Optional source type code — when 8 (generated_text),
+                routes to delete_note RPC
 
         Returns:
             True on success, False on failure
         """
+        # Route generated_text to the Note deletion RPC (AH0mwd)
+        if source_type == constants.SOURCE_TYPE_GENERATED_TEXT and notebook_id:
+            return self.delete_note(source_id, notebook_id)
+
+        # Standard source deletion via tGMBJ
         # Delete source params: [[["source_id"]], [2]]
         # Note: Extra nesting compared to delete_notebook
         params = [[[source_id]], [2]]
@@ -217,18 +238,47 @@ class SourceMixin(BaseClient):
         # Response is typically [] on success
         return result is not None
 
-    def delete_sources(self, source_ids: list[str]) -> bool:
+    def delete_sources(
+        self,
+        source_ids: list[str],
+        *,
+        notebook_id: str | None = None,
+    ) -> bool:
         """Delete multiple sources from a notebook in a single request.
 
         WARNING: This action is IRREVERSIBLE. All specified sources will be
         permanently deleted.
 
+        When `notebook_id` is provided, source types are looked up first and
+        generated_text entries are routed to `delete_note` individually while
+        regular sources go through the batch tGMBJ RPC.
+
         Args:
             source_ids: List of source UUIDs to delete
+            notebook_id: Optional notebook UUID — enables type-aware routing
 
         Returns:
-            True on success, False on failure
+            True on success (all deletions succeeded), False otherwise
         """
+        if notebook_id:
+            sources_meta = self.get_notebook_sources_with_types(notebook_id)
+            type_map = {s["id"]: s.get("source_type") for s in sources_meta}
+            note_ids = [
+                sid
+                for sid in source_ids
+                if type_map.get(sid) == constants.SOURCE_TYPE_GENERATED_TEXT
+            ]
+            regular_ids = [sid for sid in source_ids if sid not in note_ids]
+
+            ok = True
+            for nid in note_ids:
+                ok = self.delete_note(nid, notebook_id) and ok
+            if regular_ids:
+                params = [[[sid] for sid in regular_ids], [2]]
+                result = self._call_rpc(self.RPC_DELETE_SOURCE, params)
+                ok = (result is not None) and ok
+            return ok
+
         # Batch delete params: [[["id1"], ["id2"], ...], [2]]
         params = [[[sid] for sid in source_ids], [2]]
 

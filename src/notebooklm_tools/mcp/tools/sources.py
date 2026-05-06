@@ -171,13 +171,20 @@ def source_rename(notebook_id: str, source_id: str, new_title: str) -> ResultDic
 def source_delete(
     source_id: str | None = None,
     source_ids: list[str] | None = None,
+    notebook_id: str | None = None,
     confirm: bool = False,
 ) -> ResultDict:
     """Delete source(s) permanently. IRREVERSIBLE. Requires confirm=True.
 
+    For generated_text sources (saved AI responses, mind maps stored as
+    notebook content), pass `notebook_id` so the call is routed to the
+    correct backend RPC. Without notebook_id the legacy Source-only RPC is
+    used and generated_text deletion will fail.
+
     Args:
         source_id: Source UUID to delete (single)
         source_ids: List of source UUIDs to delete (bulk, alternative to source_id)
+        notebook_id: Optional notebook UUID — required for generated_text routing
         confirm: Must be True after user approval
     """
     if not confirm:
@@ -194,7 +201,9 @@ def source_delete(
 
         # Bulk delete: when source_ids list is provided
         if coerced_source_ids:
-            sources_service.delete_sources(client, coerced_source_ids)
+            sources_service.delete_sources(
+                client, coerced_source_ids, notebook_id=notebook_id
+            )
             return {
                 "status": "success",
                 "message": f"{len(coerced_source_ids)} sources have been permanently deleted.",
@@ -205,7 +214,7 @@ def source_delete(
         if not source_id:
             return error_result("Either source_id or source_ids is required.")
 
-        sources_service.delete_source(client, source_id)
+        sources_service.delete_source(client, source_id, notebook_id=notebook_id)
         return {
             "status": "success",
             "message": f"Source {source_id} has been permanently deleted.",
