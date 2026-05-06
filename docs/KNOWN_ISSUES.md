@@ -128,6 +128,63 @@ If auto-extraction fails:
 
 ---
 
+## 6. Source vs Note Backend Split (resolved in v3)
+
+### What it is
+NotebookLM backend stores two distinct object kinds with separate RPCs:
+
+- **Source** (external docs: PDF, URL, pasted text, Drive, audio, video, image)
+  - Add: `izAoDd` / `ozz5Z`
+  - Get summary: `tr032e` (RPC_GET_SOURCE_GUIDE)
+  - Get content: `hizoJc` (RPC_GET_SOURCE)
+  - Rename: `b7Wfje` (RPC_RENAME_SOURCE)
+  - Delete: `tGMBJ` (RPC_DELETE_SOURCE)
+
+- **Note** (saved AI responses, mind maps — `source_type=8` / `generated_text`)
+  - Create: `CYK0Xb`
+  - List + read body: `cFji9` (RPC_GET_NOTES — body comes inline, no per-note get RPC)
+  - Update (content+title): `cYAfTb` (RPC_UPDATE_NOTE)
+  - Delete: `AH0mwd` (RPC_DELETE_NOTE)
+
+Calling a Source-only RPC against a Note ID returns generic `Failed to ...` errors.
+
+### Symptoms (before fix)
+```python
+# Note ID passed to Source-only tools — all reject:
+source_describe(note_id)         # "Failed to get source summary."
+source_get_content(note_id)      # "Failed to get source content."
+source_rename(nb, note_id, ...)  # "Failed to rename source."
+source_delete(note_id, confirm=True)  # "Failed to delete source."
+```
+
+### Current status (v3 — resolved 2026-05-06)
+The four affected tools (`source_delete`, `source_describe`, `source_get_content`, `source_rename`) now auto-detect the object kind and route accordingly when `notebook_id` is provided:
+
+```python
+# Pass notebook_id for Notes — auto-routes to the correct backend RPC
+source_describe(note_id, notebook_id=nb)         # → list_notes content as summary
+source_get_content(note_id, notebook_id=nb)      # → list_notes content + title
+source_rename(nb, note_id, "New title")          # → update_note (title-only) cYAfTb
+source_delete(note_id, notebook_id=nb, confirm=True)  # → delete_note AH0mwd
+
+# Or use the explicit Note tool:
+note(action="update", note_id=..., title="...", notebook_id=nb)
+note(action="delete", note_id=..., notebook_id=nb, confirm=True)
+```
+
+### Backward compatibility
+All new arguments are optional. Calls without `notebook_id` keep the original Source-only behavior; the error message now includes a hint to pass `notebook_id` when the target is a Note.
+
+### Implementation
+- Helper: `core/sources._is_note_type(source_type)` — single source of truth for Note vs Source dispatch (extensible to future Note subtypes)
+- Helper: `services/sources._resolve_source_type(client, notebook_id, source_id)` — sources→notes fallback lookup, shared across the four tools
+- Note `describe` and `get_content` reuse `list_notes` (cFji9), since NotebookLM has no per-Note summary or get-by-id RPC
+- Note `rename` delegates to `update_note` with title-only change, preserving body content
+
+History: v1 (login auth, 2026-04) → v2 (`source_delete`, 2026-05-06) → v3 (`source_describe`/`source_get_content`/`source_rename`, 2026-05-06). 80 unit tests cover routing + fallback. End-to-end verified against a temporary notebook (6/6 scenarios: 3 tools × {regular source, generated_text note}).
+
+---
+
 ## Reporting Issues
 
 When reporting issues, include:
