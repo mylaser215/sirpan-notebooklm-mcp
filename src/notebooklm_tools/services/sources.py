@@ -480,31 +480,34 @@ def _resolve_source_type(
     notebook_id: str | None,
     source_id: str,
 ) -> int | None:
-    """Look up the backend source_type for a given ID, with sources→notes fallback.
+    """Resolve source type by list_notes membership only (v3 회귀 픽스, 세션310).
 
     NotebookLM stores Sources (external docs) and Notes (generated_text/mind_map)
-    as separate object kinds with separate RPCs. Callers that need type-aware
-    routing pass the resolved type to the client method.
+    as separate object kinds with separate RPCs (tGMBJ vs AH0mwd). Callers that
+    need type-aware routing pass the resolved type to the client method.
 
-    Returns None when notebook_id is missing or lookup fails — callers should
-    treat this as "default Source routing" (preserves backward compatibility).
+    회귀 배경: NLM 백엔드의 ``get_notebook`` 응답에서 모든 일반 text source의
+    ``metadata[4] = 8``로 응답됨. 상수 ``SOURCE_TYPE_GENERATED_TEXT = 8``과
+    값이 우연 일치하여, ``get_notebook_sources_with_types``의 ``source_type``
+    필드를 신뢰하면 모든 일반 source가 Note로 잘못 분류되어 ``delete_note``
+    RPC로 잘못 라우팅됨 (세션310 진단으로 확정).
+
+    권위 기준: ``list_notes`` 멤버십만 사용. 진짜 Note 객체는 ``cFji9`` 응답
+    에만 등장. ``content`` 키 존재로 mind_map JSON·deleted 항목 등을 추가
+    필터링하여 false positive 0.
+
+    Returns None when notebook_id is missing or list_notes 매칭 실패 — callers
+    should treat this as "default Source routing" (regular tGMBJ RPC).
     """
     if not notebook_id:
         return None
     try:
-        sources_meta = client.get_notebook_sources_with_types(notebook_id)
-        for s in sources_meta:
-            if s.get("id") == source_id:
-                return s.get("source_type")
-    except Exception:
-        pass
-    # Fallback: Note objects are stored separately and report as generated_text.
-    try:
         from ..core.constants import SOURCE_TYPE_GENERATED_TEXT
 
         notes = client.list_notes(notebook_id)
-        if any(n.get("id") == source_id for n in notes):
-            return SOURCE_TYPE_GENERATED_TEXT
+        for n in notes:
+            if n.get("id") == source_id and n.get("content") is not None:
+                return SOURCE_TYPE_GENERATED_TEXT
     except Exception:
         pass
     return None

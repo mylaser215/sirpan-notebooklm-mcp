@@ -416,40 +416,55 @@ class TestResolveSourceType:
         client.get_notebook_sources_with_types.assert_not_called()
         client.list_notes.assert_not_called()
 
-    def test_finds_in_sources(self):
+    def test_ignores_sources_meta_source_type(self):
+        """v3 회귀 픽스 (세션310): get_notebook의 metadata[4]가 모든 text source에서
+        SOURCE_TYPE_GENERATED_TEXT(=8)와 우연 일치 → sources_meta의 source_type 신뢰 폐기.
+        list_notes에 없으면 None 반환 (일반 RPC 라우팅).
+        """
         from notebooklm_tools.services.sources import _resolve_source_type
 
-        client = _client_with(sources=[{"id": "src1", "source_type": 4}])
-        assert _resolve_source_type(client, "nb", "src1") == 4
+        # sources_meta가 source_type=8을 응답해도 무시 (회귀 진단 결과)
+        client = _client_with(
+            sources=[{"id": "src1", "source_type": 8}],
+            notes=[],
+        )
+        assert _resolve_source_type(client, "nb", "src1") is None
 
-    def test_falls_back_to_notes(self):
+    def test_finds_in_notes_with_content(self):
+        """list_notes 멤버십 + content 키 둘 다 매칭 시 generated_text 반환."""
         from notebooklm_tools.core.constants import SOURCE_TYPE_GENERATED_TEXT
         from notebooklm_tools.services.sources import _resolve_source_type
 
-        client = _client_with(sources=[], notes=[{"id": "note1"}])
+        client = _client_with(sources=[], notes=[{"id": "note1", "content": "body"}])
         assert _resolve_source_type(client, "nb", "note1") == SOURCE_TYPE_GENERATED_TEXT
+
+    def test_returns_none_when_note_lacks_content(self):
+        """content 키 없는 note 항목은 매칭 제외 (mind_map JSON·deleted 필터링)."""
+        from notebooklm_tools.services.sources import _resolve_source_type
+
+        client = _client_with(sources=[], notes=[{"id": "note1"}])
+        assert _resolve_source_type(client, "nb", "note1") is None
 
     def test_returns_none_when_not_found(self):
         from notebooklm_tools.services.sources import _resolve_source_type
 
-        client = _client_with(sources=[{"id": "other"}], notes=[{"id": "another"}])
+        client = _client_with(sources=[{"id": "other"}], notes=[{"id": "another", "content": "x"}])
         assert _resolve_source_type(client, "nb", "missing") is None
 
-    def test_swallows_sources_lookup_error(self):
-        from notebooklm_tools.core.constants import SOURCE_TYPE_GENERATED_TEXT
+    def test_swallows_list_notes_error(self):
+        """list_notes lookup 에러 시 None 반환 (일반 RPC 라우팅으로 안전 fallback)."""
         from notebooklm_tools.services.sources import _resolve_source_type
 
         client = MagicMock()
-        client.get_notebook_sources_with_types.side_effect = RuntimeError("boom")
-        client.list_notes.return_value = [{"id": "note1"}]
-        assert _resolve_source_type(client, "nb", "note1") == SOURCE_TYPE_GENERATED_TEXT
+        client.list_notes.side_effect = RuntimeError("boom")
+        assert _resolve_source_type(client, "nb", "note1") is None
 
 
 class TestDescribeSourceRouting:
     def test_passes_resolved_type_to_client(self):
         from notebooklm_tools.core.constants import SOURCE_TYPE_GENERATED_TEXT
 
-        client = _client_with(sources=[], notes=[{"id": "note1"}])
+        client = _client_with(sources=[], notes=[{"id": "note1", "content": "body"}])
         client.get_source_guide.return_value = {"summary": "S", "keywords": ["k"]}
 
         result = describe_source(client, "note1", notebook_id="nb")
@@ -476,7 +491,7 @@ class TestGetSourceContentRouting:
     def test_passes_resolved_type_to_client(self):
         from notebooklm_tools.core.constants import SOURCE_TYPE_GENERATED_TEXT
 
-        client = _client_with(sources=[], notes=[{"id": "note1"}])
+        client = _client_with(sources=[], notes=[{"id": "note1", "content": "body"}])
         client.get_source_fulltext.return_value = {
             "content": "body",
             "title": "T",
@@ -516,7 +531,7 @@ class TestRenameSourceRouting:
         from notebooklm_tools.core.constants import SOURCE_TYPE_GENERATED_TEXT
         from notebooklm_tools.services.sources import rename_source as svc_rename
 
-        client = _client_with(sources=[], notes=[{"id": "note1"}])
+        client = _client_with(sources=[], notes=[{"id": "note1", "content": "body"}])
         client.rename_source.return_value = {"id": "note1", "title": "New"}
 
         result = svc_rename(client, "nb", "note1", "New")
@@ -527,13 +542,16 @@ class TestRenameSourceRouting:
         assert result == {"source_id": "note1", "title": "New"}
 
     def test_regular_source_passes_through(self):
+        """v3 회귀 픽스 (세션310): 일반 source는 list_notes에 없으므로 source_type=None으로
+        client.rename_source 위임 → 일반 RPC b7Wfje 사용. sources_meta source_type 신뢰 폐기.
+        """
         from notebooklm_tools.services.sources import rename_source as svc_rename
 
-        client = _client_with(sources=[{"id": "src1", "source_type": 4}], notes=[])
+        client = _client_with(sources=[{"id": "src1", "source_type": 8}], notes=[])
         client.rename_source.return_value = {"id": "src1", "title": "New"}
 
         svc_rename(client, "nb", "src1", "New")
 
         client.rename_source.assert_called_once_with(
-            "nb", "src1", "New", source_type=4
+            "nb", "src1", "New", source_type=None
         )

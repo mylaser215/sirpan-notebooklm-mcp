@@ -292,14 +292,20 @@ class SourceMixin(BaseClient):
             True on success (all deletions succeeded), False otherwise
         """
         if notebook_id:
-            sources_meta = self.get_notebook_sources_with_types(notebook_id)
-            type_map = {s["id"]: s.get("source_type") for s in sources_meta}
-            note_ids = [
-                sid
-                for sid in source_ids
-                if _is_note_type(type_map.get(sid))
-            ]
-            regular_ids = [sid for sid in source_ids if sid not in note_ids]
+            # v3 회귀 픽스 (세션310): get_notebook의 metadata[4]가 모든 text source에서 8로
+            # 응답되어 SOURCE_TYPE_GENERATED_TEXT 상수와 우연 일치 → sources_meta source_type
+            # 신뢰 시 모든 일반 source가 Note로 오분류. list_notes 멤버십을 단일 권위 기준으로
+            # 사용 (services/sources.py:_resolve_source_type 참조).
+            try:
+                note_obj_ids = {
+                    n.get("id")
+                    for n in self.list_notes(notebook_id)
+                    if n.get("id") and n.get("content") is not None
+                }
+            except Exception:
+                note_obj_ids = set()
+            note_ids = [sid for sid in source_ids if sid in note_obj_ids]
+            regular_ids = [sid for sid in source_ids if sid not in note_obj_ids]
 
             ok = True
             for nid in note_ids:
@@ -342,6 +348,11 @@ class SourceMixin(BaseClient):
                         drive_doc_id = None
                         if isinstance(metadata, list):
                             if len(metadata) > 4:
+                                # WARNING (세션310 v3 회귀): NLM 백엔드가 모든 일반 text source의
+                                # metadata[4]를 8(SOURCE_TYPE_GENERATED_TEXT 상수와 동일 값)로 응답.
+                                # 이 값은 더 이상 라우팅 권위 기준으로 신뢰할 수 없음.
+                                # Note vs Source 분기는 services/sources.py:_resolve_source_type
+                                # (list_notes 멤버십 + content 교차검증)에서 결정.
                                 source_type = metadata[4]
                             # Drive doc info at metadata[0]
                             if len(metadata) > 0 and isinstance(metadata[0], list):

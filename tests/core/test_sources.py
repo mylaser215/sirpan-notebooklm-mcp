@@ -168,23 +168,21 @@ class TestDeleteSourceRouting:
                     assert result is True
 
     def test_delete_sources_batch_splits_by_type(self):
-        """Mixed batch: notes go to delete_note, regular sources to tGMBJ batch."""
+        """Mixed batch: notes (list_notes 멤버십) → delete_note, regular sources → tGMBJ batch.
+
+        v3 회귀 픽스 (세션310): get_notebook의 metadata[4]가 모든 text source에서 8로
+        응답되어 SOURCE_TYPE_GENERATED_TEXT 상수와 우연 일치 → sources_meta source_type
+        신뢰 폐기. list_notes 멤버십(+content 키)을 단일 권위 기준으로 사용.
+        """
         from notebooklm_tools.core.client import NotebookLMClient
-        from notebooklm_tools.core.constants import (
-            SOURCE_TYPE_GENERATED_TEXT,
-            SOURCE_TYPE_PASTED_TEXT,
-        )
 
         with patch.object(NotebookLMClient, "_refresh_auth_tokens"):  # noqa: SIM117
-            with patch.object(
-                NotebookLMClient, "get_notebook_sources_with_types"
-            ) as mock_meta:
+            with patch.object(NotebookLMClient, "list_notes") as mock_list_notes:
                 with patch.object(NotebookLMClient, "delete_note") as mock_delete_note:
                     with patch.object(NotebookLMClient, "_call_rpc") as mock_rpc:
-                        mock_meta.return_value = [
-                            {"id": "note1", "source_type": SOURCE_TYPE_GENERATED_TEXT},
-                            {"id": "src1", "source_type": SOURCE_TYPE_PASTED_TEXT},
-                            {"id": "note2", "source_type": SOURCE_TYPE_GENERATED_TEXT},
+                        mock_list_notes.return_value = [
+                            {"id": "note1", "content": "body1"},
+                            {"id": "note2", "content": "body2"},
                         ]
                         mock_delete_note.return_value = True
                         mock_rpc.return_value = []
