@@ -251,6 +251,8 @@ ESSENTIAL_COOKIES = [
     "__Secure-OSID",  # Origin-bound session
     "__Secure-1PSIDTS",
     "__Secure-3PSIDTS",  # Timestamp tokens (rotate frequently)
+    "__Secure-1PSIDRTS",
+    "__Secure-3PSIDRTS",  # Rotating Token Service (10-min rotation)
     "SIDCC",
     "__Secure-1PSIDCC",
     "__Secure-3PSIDCC",  # Session cookies (rotate frequently)

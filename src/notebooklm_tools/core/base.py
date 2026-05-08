@@ -845,17 +845,22 @@ class BaseClient:
         Returns True if new valid tokens were obtained, False otherwise.
         Raises AuthRecoveryInProgress if Layer 3 was kicked off in background.
         """
-        from .auth import load_cached_tokens
+        from .auth import _is_rts_expiring, load_cached_tokens
         from .errors import AuthRecoveryInProgress
 
         # Layer 2: Reload cookies from disk (profile or legacy auth.json).
+        # RTS (10-min rotating) check prevents Layer 2 from short-circuiting on
+        # stale-but-present cookies, which would starve Layer 3 headless recovery.
         cached = load_cached_tokens()
-        if cached and cached.cookies:
+        if cached and cached.cookies and not _is_rts_expiring():
             with self._state_lock:
                 self.cookies = cached.cookies
                 self.csrf_token = ""  # Force re-extraction of CSRF token
                 self._session_id = ""  # Force re-extraction of session ID
             return True
+
+        if cached and cached.cookies:
+            logger.info("RTS token expired. Falling through to Layer 3 headless auth.")
 
         # Layer 3: Non-blocking headless auth via background thread.
         # Chrome headless takes 8-15s — blocking here causes FastMCP

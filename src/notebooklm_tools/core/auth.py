@@ -528,3 +528,45 @@ def get_auth_manager(profile: str | None = None) -> AuthManager:
         profile = get_config().auth.default_profile
 
     return AuthManager(profile)
+
+
+def _is_rts_expiring(profile_name: str = "default", margin_sec: int = 60) -> bool:
+    """Check if Google RTS (Rotating Token Service) cookies are expired or about to expire.
+
+    Google's `__Secure-1PSIDRTS` / `__Secure-3PSIDRTS` rotate every 10 minutes.
+    When they expire, cached cookies on disk are technically present but functionally
+    dead — Layer 2 cache reload returns True and starves Layer 3 headless recovery.
+
+    Conservative failsafe: any exception → return True (assume expired, force headless).
+    Optimistic-on-error reproduces the Layer 2 dead-code defect this helper fixes.
+
+    Args:
+        profile_name: Auth profile name (default: "default").
+        margin_sec: Treat as expiring if expiry < now + margin_sec (default: 60s).
+
+    Returns:
+        True if RTS missing / expiring / unparseable. False only if RTS healthy.
+    """
+    try:
+        import json
+        import time
+
+        from notebooklm_tools.utils.config import get_profile_dir
+
+        cookies_path = get_profile_dir(profile_name) / "cookies.json"
+        if not cookies_path.exists():
+            return True
+        items = json.loads(cookies_path.read_text(encoding="utf-8"))
+        if not isinstance(items, list):
+            return True
+        for c in items:
+            if not isinstance(c, dict):
+                continue
+            if c.get("name") in ("__Secure-1PSIDRTS", "__Secure-3PSIDRTS"):
+                e = c.get("expires") or c.get("expirationDate") or 0
+                e_sec = e / 1000 if e > 1e12 else e
+                if e_sec < time.time() + margin_sec:
+                    return True
+        return False
+    except Exception:
+        return True

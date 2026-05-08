@@ -9,6 +9,7 @@ from ._utils import (
     error_result,
     get_client,
     logged_tool,
+    mcp_logger,
     reset_client,
 )
 
@@ -23,20 +24,38 @@ def refresh_auth() -> ResultDict:
     Returns status indicating if tokens were refreshed successfully.
     """
     try:
-        # Try reloading from disk first
-        from notebooklm_tools.core.auth import load_cached_tokens
+        from notebooklm_tools.core.auth import _is_rts_expiring, load_cached_tokens
 
+        # When Google RTS (10-min rotating token) has expired, disk reload alone
+        # returns stale cookies and falsely reports success. Headless re-auth is
+        # the only path that can actually recover. Try it first.
+        if _is_rts_expiring():
+            try:
+                from notebooklm_tools.utils.cdp import run_headless_auth
+
+                tokens = run_headless_auth()
+                if tokens:
+                    reset_client()
+                    get_client()
+                    mcp_logger.info("RTS token expired. Refreshed via headless auth.")
+                    return {
+                        "status": "success",
+                        "message": "RTS rotated. Auth refreshed via headless Chrome.",
+                    }
+            except Exception as e:
+                mcp_logger.debug(f"Headless auth on RTS rotation failed: {e}")
+
+        # RTS healthy (or headless unavailable): try disk reload
         cached = load_cached_tokens()
         if cached:
-            # Reset client to force re-initialization with fresh tokens
             reset_client()
-            get_client()  # This will use the cached tokens
+            get_client()
             return {
                 "status": "success",
                 "message": "Auth tokens reloaded from disk cache.",
             }
 
-        # Try headless auth if Chrome profile exists
+        # No cache: try headless auth if Chrome profile exists
         try:
             from notebooklm_tools.utils.cdp import run_headless_auth
 
