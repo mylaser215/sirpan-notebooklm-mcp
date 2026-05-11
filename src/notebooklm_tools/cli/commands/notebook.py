@@ -128,14 +128,34 @@ def clone_notebook_cmd(
         "(e.g., 'url,note'). Omit for default binary-exclude; "
         "pass '' to attempt all types (binaries still skipped).",
     ),
+    acknowledge_quality_loss: bool = typer.Option(
+        False,
+        "--acknowledge-quality-loss",
+        help="REQUIRED: clone is lower-quality than Agent full-clone "
+        "(NLM raw-content loss — broken newlines, missing bold/codeblock).",
+    ),
     json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
     profile: str | None = typer.Option(None, "--profile", "-p", help="Profile to use"),
 ) -> None:
-    """Clone a notebook (all sources + notes) into a new notebook.
+    """Clone a notebook (gated — quality inferior to Agent full-clone).
 
-    Binary source types (PDF/audio/image/uploaded_file/word_doc) are
-    skipped by default because NLM does not expose original files.
+    ⚠️ Until NLM exposes raw-content retrieval (todo 260512-053000), this
+    command requires --acknowledge-quality-loss to proceed. For routine sync
+    use ``nlm source replace-file`` (uploads from disk, preserves quality).
     """
+    if not acknowledge_quality_loss:
+        console.print(
+            "[red]Error:[/red] notebook clone is gated. NLM's get_source_fulltext "
+            "loses raw markdown (broken newlines, missing bold/codeblock). "
+            "Use Agent full-clone for high-quality clones, or "
+            "[bold]nlm source replace-file[/bold] for routine sync."
+        )
+        console.print(
+            "[dim]To proceed anyway, pass --acknowledge-quality-loss. "
+            "See todo 260512-053000.[/dim]"
+        )
+        raise typer.Exit(1)
+
     notebook_id = get_alias_manager().resolve(notebook_id)
 
     if exclude is None:

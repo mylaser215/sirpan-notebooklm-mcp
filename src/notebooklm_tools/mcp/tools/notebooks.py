@@ -116,26 +116,38 @@ def notebook_clone(
     notebook_id: str,
     new_title: str,
     exclude_types: list[str] | None = None,
+    acknowledge_quality_loss: bool = False,
 ) -> ResultDict:
-    """Clone a notebook by replicating all sources and notes into a new notebook.
+    """Clone a notebook (gated — quality inferior to Agent full-clone).
 
-    Binary source types (PDF/audio/image/uploaded_file/word_doc) are skipped
-    by default because NLM does not return original uploaded files — only
-    AI-extracted text. Pass ``exclude_types=[]`` to override the default
-    binary-exclude set, but binaries remain skipped (reason
-    ``binary_no_source_file``) since their original file is irrecoverable.
+    ⚠️ Quality gate: NLM's ``get_source_fulltext`` returns markdown sources as
+    already-flattened plain text (broken newlines, missing **bold**, no code
+    blocks). Cloning round-trips that lossy text back into NLM, so the cloned
+    notebook renders worse than a clone made by reading the original .md files
+    from disk (e.g., the Agent full-clone workflow).
 
-    Use this instead of round-tripping every source through Claude when
-    duplicating system notebooks or scratch copies — the MCP server replicates
-    via direct NLM HTTP calls.
+    Until a raw-content RPC is discovered (todo 260512-053000), this tool is
+    disabled by default. For high-quality clones use Agent full-clone; for
+    routine NLM sync use ``source_replace_file`` (which uploads from disk and
+    preserves quality completely).
 
     Args:
-        notebook_id: UUID of the notebook to clone from
-        new_title: Title for the new notebook
+        notebook_id: UUID of the notebook to clone from.
+        new_title: Title for the new notebook.
         exclude_types: Lowercased ``source_type_name`` values to skip
-            (e.g., ["url", "note"]). Pass ``None`` for default binary exclude;
-            ``[]`` to attempt all types.
+            (e.g., ["url", "note"]). ``None`` keeps the default binary exclude;
+            ``[]`` attempts all types (binaries still skipped as irrecoverable).
+        acknowledge_quality_loss: Must be ``True`` to proceed. Forces the caller
+            to acknowledge that this clone is lower-quality than Agent full-clone.
     """
+    if not acknowledge_quality_loss:
+        return error_result(
+            "notebook_clone is gated. NLM's get_source_fulltext loses raw markdown "
+            "(broken newlines, missing bold/codeblock). Use Agent full-clone for "
+            "high-quality clones, or source_replace_file for routine sync. "
+            "Pass acknowledge_quality_loss=True to proceed anyway.",
+            hint="See todo 260512-053000 for the raw-content RPC discovery task.",
+        )
     try:
         client = get_client()
         result = notebooks_service.clone_notebook(

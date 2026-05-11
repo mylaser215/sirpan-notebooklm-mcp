@@ -47,6 +47,17 @@ class TestNotebookCloneCli:
         base.update(overrides)
         return base
 
+    def test_clone_gated_without_acknowledge_flag(self, runner):
+        """Default CLI invocation must abort with a quality-gate error."""
+        with patch(
+            "notebooklm_tools.cli.commands.notebook.notebooks_service.clone_notebook"
+        ) as clone_mock:
+            r = runner.invoke(notebook_app, ["clone", "nb-src", "Cloned NB"])
+
+        assert r.exit_code != 0
+        assert "gated" in r.stdout.lower() or "quality" in r.stdout.lower()
+        clone_mock.assert_not_called()
+
     def test_clone_invokes_service_with_default_exclude(
         self, runner, mock_client_cm, alias_identity
     ):
@@ -66,7 +77,10 @@ class TestNotebookCloneCli:
                 return_value=result_dict,
             ) as clone_mock,
         ):
-            r = runner.invoke(notebook_app, ["clone", "nb-src", "Cloned NB"])
+            r = runner.invoke(
+                notebook_app,
+                ["clone", "nb-src", "Cloned NB", "--acknowledge-quality-loss"],
+            )
 
         assert r.exit_code == 0
         # default: exclude_types=None
@@ -94,7 +108,14 @@ class TestNotebookCloneCli:
         ):
             r = runner.invoke(
                 notebook_app,
-                ["clone", "nb-src", "Cloned", "--exclude", "url, note ,pdf"],
+                [
+                    "clone",
+                    "nb-src",
+                    "Cloned",
+                    "--exclude",
+                    "url, note ,pdf",
+                    "--acknowledge-quality-loss",
+                ],
             )
 
         assert r.exit_code == 0
