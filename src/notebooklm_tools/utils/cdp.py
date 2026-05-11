@@ -1039,13 +1039,23 @@ def extract_cookies_from_page(
 def has_chrome_profile(profile_name: str = "default") -> bool:
     """Check if a Chrome profile with saved login exists.
 
-    Returns True if the profile directory exists and has login cookies,
-    indicating that the user has previously authenticated.
+    Chrome 96+ moved Cookies from `Default/Cookies` to `Default/Network/Cookies`.
+    Both locations are checked for backwards compatibility.
     """
     profile_dir = get_chrome_profile_dir(profile_name)
-    # Check for Cookies file which indicates the profile has been used
-    cookies_file = profile_dir / "Default" / "Cookies"
-    return cookies_file.exists()
+    for cookies_file in (
+        profile_dir / "Default" / "Network" / "Cookies",
+        profile_dir / "Default" / "Cookies",
+    ):
+        if cookies_file.exists():
+            return True
+
+    if (profile_dir / "Default").is_dir():
+        _logger.warning(
+            "[Auth] Headless auth unavailable: Chrome Cookies file not found "
+            "(path changed?). Checked: Default/Network/Cookies, Default/Cookies"
+        )
+    return False
 
 
 def cleanup_chrome_profile_cache(profile_name: str = "default") -> int:

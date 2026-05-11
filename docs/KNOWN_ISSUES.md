@@ -185,6 +185,22 @@ History: v1 (login auth, 2026-04) → v2 (`source_delete`, 2026-05-06) → v3 (`
 
 ---
 
+## 7. Chrome Cookies Path Migration (Chrome 96+, resolved 2026-05-11)
+
+### What it is
+`utils/cdp.has_chrome_profile()` checked only the legacy `Default/Cookies` location. Chrome 96+ (Dec 2021) moved cookies to `Default/Network/Cookies` to bundle them with network-state data.
+
+### When it broke
+Any user whose Chrome had migrated to the new layout. `has_chrome_profile()` returned `False` even when a valid login profile existed → `run_headless_auth()` short-circuited to `None` at line 1118 → `refresh_auth` silently fell back to disk reload of stale cookies, defeating the session-29 RTS expiry fix (`3c48a50`). User-visible symptom: repeated `Authentication expired` responses despite a working `nlm login`.
+
+### How it was fixed
+`has_chrome_profile()` now checks both `Default/Network/Cookies` (preferred) and `Default/Cookies` (legacy). When neither exists but `Default/` is present, a `WARNING` is logged so a future Chrome path move is detected immediately instead of failing silently.
+
+### Future-proof note
+If Chrome relocates cookies again, the warning surfaces on first headless attempt. Other Chrome assets verified safe in 2026-05-11 audit: `Local State` (User Data root, unchanged), `Login Data` (legacy location retained). Re-audit when Chrome major version jumps cross 120+.
+
+---
+
 ## Reporting Issues
 
 When reporting issues, include:
