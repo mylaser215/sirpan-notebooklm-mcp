@@ -1,6 +1,7 @@
 """Sources service — shared validation and logic for source management."""
 
 import urllib.parse
+from pathlib import Path
 from typing import Any, TypedDict
 
 from ..core.client import NotebookLMClient
@@ -19,6 +20,31 @@ DRIVE_MIME_TYPES = {
     "sheets": "application/vnd.google-apps.spreadsheet",
     "pdf": "application/pdf",
 }
+
+# Mirrors the supported_extensions check in core/sources.py:add_file.
+# Duplicated here so replace_source_file can fail BEFORE the destructive
+# delete step (Pre-check pattern — load-bearing safety, not redundancy).
+SUPPORTED_FILE_EXTS = frozenset(
+    {
+        ".pdf",
+        ".txt",
+        ".md",
+        ".docx",
+        ".csv",
+        ".mp3",
+        ".m4a",
+        ".wav",
+        ".aac",
+        ".ogg",
+        ".opus",
+        ".mp4",
+        ".jpg",
+        ".jpeg",
+        ".png",
+        ".gif",
+        ".webp",
+    }
+)
 
 
 class AddSourceResult(TypedDict):
@@ -84,6 +110,17 @@ class BulkAddResult(TypedDict):
 
     results: list[AddSourceResult]
     added_count: int
+
+
+class ReplaceSourceFileResult(TypedDict):
+    """Result of replacing an existing source with a new local file upload."""
+
+    notebook_id: str
+    old_source_id: str
+    new_source_id: str
+    title: str
+    file_path: str
+    message: str
 
 
 def validate_source_type(source_type: str) -> None:
@@ -699,3 +736,106 @@ def get_source_content(
             user_message="Failed to get source content.",
             hint=_NOTE_HINT if not notebook_id else None,
         ) from e
+
+
+def replace_source_file(
+    client: NotebookLMClient,
+    notebook_id: str,
+    source_id: str,
+    file_path: str,
+) -> ReplaceSourceFileResult:
+    """Replace an existing source by deleting it and uploading a new local file.
+
+    Composition wrapper over ``delete_source`` + ``add_source`` (DRY — does
+    not inline RPC calls). NLM has no in-place update RPC for file sources,
+    so a delete + add transaction is required, which changes the source_id.
+
+    Pre-check is intentionally redundant with ``core/sources.py:add_file``'s
+    file validation — load-bearing safety to fail BEFORE the destructive
+    delete step. Without it, a missing/invalid file would surface only after
+    the delete succeeds, leaving the source permanently lost.
+
+    Args:
+        client: Authenticated NotebookLM client
+        notebook_id: Notebook UUID containing the source
+        source_id: Source UUID to replace
+        file_path: Path to the local file to upload as the replacement
+
+    Returns:
+        ReplaceSourceFileResult with old/new source IDs, title, and path.
+
+    Raises:
+        ValidationError: If file_path is missing, not a file, empty, or has
+            an unsupported extension (pre-check, before delete).
+        ServiceError: If delete or add fails. If delete succeeded but add
+            failed, the error message and ``user_message`` make this state
+            explicit (the original source is gone).
+    """
+    # 1. Pre-check — MUST run before any destructive operation
+    p = Path(file_path)
+    if not p.exists():
+        raise ValidationError(
+            f"File not found: {file_path}",
+            user_message=f"File does not exist: {file_path}",
+        )
+    if not p.is_file():
+        raise ValidationError(
+            f"Not a regular file: {file_path}",
+            user_message=f"Path is not a regular file: {file_path}",
+        )
+    if p.stat().st_size == 0:
+        raise ValidationError(
+            f"File is empty: {file_path}",
+            user_message=f"File is empty: {file_path}",
+        )
+    ext = p.suffix.lower()
+    if ext not in SUPPORTED_FILE_EXTS:
+        raise ValidationError(
+            f"Unsupported file type: {ext}",
+            user_message=f"Unsupported file type: {ext}",
+            hint=f"Supported types: {', '.join(sorted(SUPPORTED_FILE_EXTS))}",
+        )
+
+    # 2. Title preservation (best-effort, non-fatal)
+    preserved_title: str | None = None
+    try:
+        for src in client.get_notebook_sources_with_types(notebook_id):
+            if src.get("id") == source_id:
+                title_val = src.get("title")
+                if isinstance(title_val, str) and title_val.strip():
+                    preserved_title = title_val
+                break
+    except Exception:
+        pass  # title preservation is optional; proceed without it
+
+    # 3. Delete the existing source (Composition — propagates ServiceError)
+    delete_source(client, source_id, notebook_id=notebook_id)
+
+    # 4. Add the new file (Composition). On failure, the original source is
+    # already gone — surface that explicitly so the user knows to re-add.
+    try:
+        add_res = add_source(
+            client,
+            notebook_id,
+            "file",
+            file_path=str(p),
+            title=preserved_title,
+        )
+    except (ValidationError, ServiceError) as e:
+        raise ServiceError(
+            f"Replace failed: delete succeeded but add failed: {e}",
+            user_message=(
+                "Source was deleted but the replacement upload failed. "
+                "The original source is gone; please re-add the file manually."
+            ),
+            hint="Verify the file path and retry add_source with source_type='file'.",
+        ) from e
+
+    return {
+        "notebook_id": notebook_id,
+        "old_source_id": source_id,
+        "new_source_id": add_res["source_id"],
+        "title": add_res["title"],
+        "file_path": str(p),
+        "message": f"Replaced source {source_id} with {add_res['source_id']}",
+    }

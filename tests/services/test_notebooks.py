@@ -12,6 +12,7 @@ from notebooklm_tools.services.errors import (
     ValidationError,
 )
 from notebooklm_tools.services.notebooks import (
+    clone_notebook,
     create_notebook,
     delete_notebook,
     describe_notebook,
@@ -223,3 +224,155 @@ class TestDeleteNotebook:
         mock_client.delete_notebook.side_effect = RuntimeError("fail")
         with pytest.raises(ServiceError, match="Failed to delete notebook"):
             delete_notebook(mock_client, "nb-123")
+
+
+def _clone_fixture_client(sources=None, notes=None, create_id="nb-clone"):
+    """Build a MagicMock client preconfigured for clone_notebook scenarios."""
+    client = MagicMock()
+    client.get_notebook.return_value = [["Src Title", [], "nb-src"]]
+    client.get_notebook_sources_with_types.return_value = sources or []
+    client.list_notes.return_value = notes or []
+    client.create_notebook.return_value = _make_notebook(id=create_id, title="Cloned")
+    client.add_url_source.return_value = {"id": "url-new", "title": "Url Page"}
+    client.add_text_source.return_value = {"id": "text-new", "title": "Pasted"}
+    client.add_drive_source.return_value = {"id": "drive-new", "title": "Drive Doc"}
+    client.get_source_fulltext.return_value = {"content": "body", "title": "Pasted"}
+    client.create_note.return_value = {"id": "note-new", "title": "Note A", "content": "x"}
+    client.delete_notebook.return_value = True
+    return client
+
+
+class TestCloneNotebook:
+    """Test clone_notebook service function."""
+
+    def test_happy_path_clones_urls_text_and_note(self):
+        sources = [
+            {
+                "id": "s1",
+                "title": "Page A",
+                "source_type": 5,
+                "source_type_name": "web_page",
+                "url": "https://example.com/a",
+            },
+            {
+                "id": "s2",
+                "title": "Page B",
+                "source_type": 5,
+                "source_type_name": "web_page",
+                "url": "https://example.com/b",
+            },
+            {
+                "id": "s3",
+                "title": "Pasted",
+                "source_type": 4,
+                "source_type_name": "pasted_text",
+            },
+        ]
+        notes = [{"id": "n1", "title": "Note A", "content": "hello"}]
+        client = _clone_fixture_client(sources=sources, notes=notes)
+
+        result = clone_notebook(client, "nb-src", "Cloned")
+
+        assert result["new_notebook_id"] == "nb-clone"
+        assert result["new_title"] == "Cloned"
+        assert result["total_cloned"] == 4
+        assert len(result["cloned_sources"]) == 3
+        assert len(result["cloned_notes"]) == 1
+        assert result["skipped"] == []
+        assert client.add_url_source.call_count == 2
+        assert client.add_text_source.call_count == 1
+        assert client.create_note.call_count == 1
+
+    def test_default_excludes_binary_pdf(self):
+        sources = [
+            {
+                "id": "s1",
+                "title": "Doc.pdf",
+                "source_type": 3,
+                "source_type_name": "pdf",
+            },
+            {
+                "id": "s2",
+                "title": "Page",
+                "source_type": 5,
+                "source_type_name": "web_page",
+                "url": "https://example.com",
+            },
+        ]
+        client = _clone_fixture_client(sources=sources)
+
+        result = clone_notebook(client, "nb-src", "Cloned")
+
+        assert len(result["cloned_sources"]) == 1
+        assert len(result["skipped"]) == 1
+        assert result["skipped"][0]["type"] == "pdf"
+        assert result["skipped"][0]["reason"] == "binary_no_source_file"
+        client.add_drive_source.assert_not_called()
+
+    def test_exclude_types_url_skips_all_urls(self):
+        sources = [
+            {
+                "id": "s1",
+                "title": "Page A",
+                "source_type": 5,
+                "source_type_name": "web_page",
+                "url": "https://example.com/a",
+            },
+            {
+                "id": "s2",
+                "title": "Page B",
+                "source_type": 9,
+                "source_type_name": "youtube",
+                "url": "https://youtu.be/x",
+            },
+        ]
+        client = _clone_fixture_client(sources=sources)
+
+        result = clone_notebook(client, "nb-src", "Cloned", exclude_types=["web_page", "youtube"])
+
+        assert len(result["cloned_sources"]) == 0
+        assert len(result["skipped"]) == 2
+        assert all(s["reason"] == "excluded" for s in result["skipped"])
+        client.add_url_source.assert_not_called()
+
+    def test_fail_close_rollback_on_add_failure(self):
+        sources = [
+            {
+                "id": "s1",
+                "title": "Page A",
+                "source_type": 5,
+                "source_type_name": "web_page",
+                "url": "https://example.com/a",
+            },
+            {
+                "id": "s2",
+                "title": "Page B",
+                "source_type": 5,
+                "source_type_name": "web_page",
+                "url": "https://example.com/b",
+            },
+        ]
+        client = _clone_fixture_client(sources=sources)
+        client.add_url_source.side_effect = [
+            {"id": "url-1", "title": "Page A"},
+            RuntimeError("API rate-limited"),
+        ]
+
+        with pytest.raises(ServiceError, match="Clone failed"):
+            clone_notebook(client, "nb-src", "Cloned")
+
+        client.delete_notebook.assert_called_once_with("nb-clone")
+
+    def test_source_notebook_not_found_raises(self):
+        client = _clone_fixture_client()
+        client.get_notebook.return_value = None
+
+        with pytest.raises(NotFoundError, match="not found"):
+            clone_notebook(client, "nb-missing", "Cloned")
+
+        client.create_notebook.assert_not_called()
+
+    def test_empty_new_title_raises_validation(self):
+        client = _clone_fixture_client()
+        with pytest.raises(ValidationError, match="new_title"):
+            clone_notebook(client, "nb-src", "   ")

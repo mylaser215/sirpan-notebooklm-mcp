@@ -14,6 +14,7 @@ from notebooklm_tools.services.sources import (
     describe_source,
     get_source_content,
     list_drive_sources,
+    replace_source_file,
     resolve_drive_mime_type,
     sync_drive_sources,
     validate_source_type,
@@ -555,3 +556,86 @@ class TestRenameSourceRouting:
         client.rename_source.assert_called_once_with(
             "nb", "src1", "New", source_type=None
         )
+
+
+class TestReplaceSourceFile:
+    """Test replace_source_file service function."""
+
+    def test_happy_path_delete_then_add(self, mock_client, tmp_path):
+        file_path = tmp_path / "doc.txt"
+        file_path.write_text("hello world")
+
+        # No matching source for title preservation
+        mock_client.get_notebook_sources_with_types.return_value = []
+
+        # Track call order
+        call_order = []
+        mock_client.delete_source.side_effect = lambda *a, **kw: (
+            call_order.append("delete") or True
+        )
+        mock_client.add_file.side_effect = lambda *a, **kw: (
+            call_order.append("add") or {"id": "src-new", "title": "doc.txt"}
+        )
+
+        result = replace_source_file(mock_client, "nb-1", "src-old", str(file_path))
+
+        assert call_order == ["delete", "add"]
+        assert result["notebook_id"] == "nb-1"
+        assert result["old_source_id"] == "src-old"
+        assert result["new_source_id"] == "src-new"
+        assert result["title"] == "doc.txt"
+        assert "Replaced" in result["message"]
+
+    def test_title_preserved_from_existing_source(self, mock_client, tmp_path):
+        file_path = tmp_path / "doc.txt"
+        file_path.write_text("content")
+
+        mock_client.get_notebook_sources_with_types.return_value = [
+            {"id": "src-old", "title": "Original Title", "source_type_name": "Text"},
+        ]
+        # Track that add_file was called with the preserved title metadata
+        mock_client.add_file.return_value = {"id": "src-new", "title": "Original Title"}
+
+        result = replace_source_file(mock_client, "nb-1", "src-old", str(file_path))
+
+        assert result["title"] == "Original Title"
+
+    @pytest.mark.parametrize(
+        "scenario",
+        ["missing", "directory", "empty", "unsupported_ext"],
+    )
+    def test_pre_check_failure_skips_destructive_delete(
+        self, mock_client, tmp_path, scenario
+    ):
+        if scenario == "missing":
+            bad_path = tmp_path / "ghost.txt"  # never created
+        elif scenario == "directory":
+            bad_path = tmp_path / "a_dir"
+            bad_path.mkdir()
+        elif scenario == "empty":
+            bad_path = tmp_path / "empty.txt"
+            bad_path.write_text("")
+        else:  # unsupported_ext
+            bad_path = tmp_path / "weird.xyz"
+            bad_path.write_text("content")
+
+        with pytest.raises(ValidationError):
+            replace_source_file(mock_client, "nb-1", "src-old", str(bad_path))
+
+        # Load-bearing: delete must NEVER fire when pre-check fails
+        mock_client.delete_source.assert_not_called()
+        mock_client.add_file.assert_not_called()
+
+    def test_delete_success_add_failure_surfaces_explicitly(self, mock_client, tmp_path):
+        file_path = tmp_path / "doc.txt"
+        file_path.write_text("content")
+
+        mock_client.get_notebook_sources_with_types.return_value = []
+        mock_client.delete_source.return_value = True
+        mock_client.add_file.side_effect = RuntimeError("upload network error")
+
+        with pytest.raises(ServiceError, match="delete succeeded but add failed"):
+            replace_source_file(mock_client, "nb-1", "src-old", str(file_path))
+
+        # delete was called exactly once before the add failure
+        assert mock_client.delete_source.call_count == 1

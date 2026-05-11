@@ -112,6 +112,43 @@ def notebook_rename(notebook_id: str, new_title: str) -> ResultDict:
 
 
 @logged_tool()
+def notebook_clone(
+    notebook_id: str,
+    new_title: str,
+    exclude_types: list[str] | None = None,
+) -> ResultDict:
+    """Clone a notebook by replicating all sources and notes into a new notebook.
+
+    Binary source types (PDF/audio/image/uploaded_file/word_doc) are skipped
+    by default because NLM does not return original uploaded files — only
+    AI-extracted text. Pass ``exclude_types=[]`` to override the default
+    binary-exclude set, but binaries remain skipped (reason
+    ``binary_no_source_file``) since their original file is irrecoverable.
+
+    Use this instead of round-tripping every source through Claude when
+    duplicating system notebooks or scratch copies — the MCP server replicates
+    via direct NLM HTTP calls.
+
+    Args:
+        notebook_id: UUID of the notebook to clone from
+        new_title: Title for the new notebook
+        exclude_types: Lowercased ``source_type_name`` values to skip
+            (e.g., ["url", "note"]). Pass ``None`` for default binary exclude;
+            ``[]`` to attempt all types.
+    """
+    try:
+        client = get_client()
+        result = notebooks_service.clone_notebook(
+            client, notebook_id, new_title, exclude_types=exclude_types
+        )
+        return {"status": "success", **result}
+    except ServiceError as e:
+        return error_result(e.user_message, hint=e.hint)
+    except Exception as e:
+        return error_result(str(e))
+
+
+@logged_tool()
 def notebook_delete(notebook_id: str, confirm: bool = False) -> ResultDict:
     """Delete notebook permanently. IRREVERSIBLE. Requires confirm=True.
 

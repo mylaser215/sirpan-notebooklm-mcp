@@ -116,6 +116,55 @@ def rename_notebook(
         handle_error(e, json_output=locals().get("json_output", False))
 
 
+@app.command("clone")
+def clone_notebook_cmd(
+    notebook_id: str = typer.Argument(..., help="Source notebook ID to clone from"),
+    new_title: str = typer.Argument(..., help="Title for the new (cloned) notebook"),
+    exclude: str | None = typer.Option(
+        None,
+        "--exclude",
+        "-e",
+        help="Comma-separated source_type_name values to skip "
+        "(e.g., 'url,note'). Omit for default binary-exclude; "
+        "pass '' to attempt all types (binaries still skipped).",
+    ),
+    json_output: bool = typer.Option(False, "--json", "-j", help="Output as JSON"),
+    profile: str | None = typer.Option(None, "--profile", "-p", help="Profile to use"),
+) -> None:
+    """Clone a notebook (all sources + notes) into a new notebook.
+
+    Binary source types (PDF/audio/image/uploaded_file/word_doc) are
+    skipped by default because NLM does not expose original files.
+    """
+    notebook_id = get_alias_manager().resolve(notebook_id)
+
+    if exclude is None:
+        exclude_types: list[str] | None = None
+    else:
+        exclude_types = [e.strip().lower() for e in exclude.split(",") if e.strip()]
+
+    try:
+        with get_client(profile) as client:
+            result = notebooks_service.clone_notebook(
+                client, notebook_id, new_title, exclude_types=exclude_types
+            )
+
+        fmt = detect_output_format(json_output)
+        formatter = get_formatter(fmt, console)
+        formatter.format_item(result, title="Clone Result")
+
+        if not json_output:
+            console.print(
+                f"[green]✓[/green] Cloned to {result['new_notebook_id']}: "
+                f"{result['total_cloned']} item(s) "
+                f"({len(result['cloned_sources'])} sources, "
+                f"{len(result['cloned_notes'])} notes, "
+                f"{len(result['skipped'])} skipped)"
+            )
+    except (ServiceError, NLMError) as e:
+        handle_error(e, json_output=locals().get("json_output", False))
+
+
 @app.command("delete")
 def delete_notebook(
     notebook_id: str = typer.Argument(..., help="Notebook ID"),

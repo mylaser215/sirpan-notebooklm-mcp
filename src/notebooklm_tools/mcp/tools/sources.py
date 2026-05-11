@@ -230,6 +230,51 @@ def source_delete(
 
 
 @logged_tool()
+def source_replace_file(
+    notebook_id: str,
+    source_id: str,
+    file_path: str,
+    confirm: bool = False,
+) -> ResultDict:
+    """Replace an existing source by deleting it and uploading a new local file.
+
+    NLM has no in-place update RPC for file sources, so this is a
+    delete + add transaction. The MCP server reads the file directly from
+    disk — avoid round-tripping file contents through Claude.
+
+    The source_id changes after replacement (NLM mints a new ID on add).
+    Pre-checks file existence, regular-file status, non-empty size, and
+    supported extension before the destructive delete so a missing/invalid
+    file cannot orphan the source.
+
+    Args:
+        notebook_id: Notebook UUID containing the source
+        source_id: Source UUID to replace
+        file_path: Absolute path to the local file to upload
+        confirm: Must be True after user approval (replace is destructive —
+            the old source is deleted before the new file is uploaded)
+    """
+    if not confirm:
+        return error_result(
+            "Replace not confirmed. Set confirm=True after user approval.",
+            warning="The existing source will be deleted before the new file is uploaded.",
+        )
+
+    try:
+        client = get_client()
+        result = sources_service.replace_source_file(
+            client, notebook_id, source_id, file_path
+        )
+        return {"status": "success", **result}
+    except ValidationError as e:
+        return error_result(str(e), hint=e.hint)
+    except ServiceError as e:
+        return error_result(e.user_message, hint=e.hint)
+    except Exception as e:
+        return error_result(str(e))
+
+
+@logged_tool()
 def source_describe(source_id: str, notebook_id: str | None = None) -> ResultDict:
     """Get AI-generated source summary with keyword chips.
 

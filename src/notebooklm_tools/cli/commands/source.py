@@ -336,6 +336,47 @@ def delete_source(
         handle_error(e, json_output=locals().get("json_output", False))
 
 
+@app.command("replace-file")
+def replace_source_file_cmd(
+    notebook_id: str = typer.Argument(..., help="Notebook ID containing the source"),
+    source_id: str = typer.Argument(..., help="Source ID to replace"),
+    file_path: str = typer.Argument(..., help="Local file path to upload as replacement"),
+    confirm: bool = typer.Option(False, "--confirm", "-y", help="Skip confirmation"),
+    profile: str | None = typer.Option(None, "--profile", "-p", help="Profile to use"),
+) -> None:
+    """Replace an existing source with a new local file upload.
+
+    NLM has no in-place update RPC for file sources, so this is a
+    delete + add transaction (the source_id changes after replacement).
+    Pre-checks file existence/size/extension before the destructive delete.
+
+    Example:
+        nlm source replace-file <notebook-id> <source-id> ./new.md --confirm
+    """
+    notebook_id = get_alias_manager().resolve(notebook_id)
+    source_id = get_alias_manager().resolve(source_id)
+
+    if not confirm:
+        typer.confirm(
+            f"Replace source {source_id} with {file_path}? "
+            "The existing source will be deleted before the new file is uploaded.",
+            abort=True,
+        )
+
+    try:
+        with get_client(profile) as client:
+            result = sources_service.replace_source_file(
+                client, notebook_id, source_id, file_path
+            )
+        console.print(
+            f"[green]✓[/green] Replaced source. Old: {result['old_source_id']} → "
+            f"New: {result['new_source_id']}"
+        )
+        console.print(f"[dim]Title: {result['title']}[/dim]")
+    except (ServiceError, NLMError) as e:
+        handle_error(e, json_output=locals().get("json_output", False))
+
+
 @app.command("stale")
 def list_stale_sources(
     notebook_id: str = typer.Argument(..., help="Notebook ID"),
