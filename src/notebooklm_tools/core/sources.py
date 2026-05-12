@@ -797,12 +797,19 @@ class SourceMixin(BaseClient):
         Raises:
             FileUploadError: If registration fails
         """
-        # Params: [[filename]], notebook_id, [2], [options]
+        # Params: [[filename]], notebook_id, [2, None, None, [options]]
+        # NLM 웹의 o4cbdc RPC payload 구조와 1:1 일치 (v4 결함 픽스 검증):
+        # 3 top-level slots, 마지막은 nested array로 [2, null, null, [1, null×10, [1]]].
+        # 이전 4-slot 분리 구조는 markdown 파서 라우팅 실패의 원인 후보.
         params = [
             [[filename]],
             notebook_id,
-            [2],
-            [1, None, None, None, None, None, None, None, None, None, [1]],
+            [
+                2,
+                None,
+                None,
+                [1, None, None, None, None, None, None, None, None, None, None, [1]],
+            ],
         ]
 
         source_path = f"/notebook/{notebook_id}"
@@ -971,25 +978,57 @@ class SourceMixin(BaseClient):
         if file_size == 0:
             raise FileValidationError(f"File is empty: {file_path}")
 
-        # Validate file type
+        # Validate file type — NLM 웹 dialog의 공식 지원 목록 (사용자 캡쳐 Image #43, 260512).
+        # 코드/구조화 데이터(.py/.json/.ts 등)는 NLM 미지원. markdown 파서는 .md에만 의미
+        # (v4 결함 후속 학습 — 추측 사고 3 박제 → 허브 운영메모 참조).
         supported_extensions = {
+            # Documents (NLM 공식)
             ".pdf",
             ".txt",
             ".md",
             ".docx",
-            ".csv",  # Documents
-            ".mp3",
-            ".m4a",
-            ".wav",
+            ".csv",
+            ".pptx",
+            ".epub",
+            # Audio (NLM 공식)
+            ".3g2",
+            ".3gp",
             ".aac",
+            ".aif",
+            ".aifc",
+            ".aiff",
+            ".amr",
+            ".au",
+            ".cda",
+            ".m4a",
+            ".mid",
+            ".mp3",
+            ".mpeg",
             ".ogg",
-            ".opus",  # Audio
-            ".mp4",  # Video
-            ".jpg",
-            ".jpeg",
-            ".png",
+            ".opus",
+            ".ra",
+            ".ram",
+            ".snd",
+            ".wav",
+            ".wma",
+            # Video (NLM 공식)
+            ".avi",
+            ".mp4",
+            # Images (NLM 공식)
+            ".avif",
+            ".bmp",
             ".gif",
-            ".webp",  # Images
+            ".heic",
+            ".heif",
+            ".ico",
+            ".jp2",
+            ".jpe",
+            ".jpeg",
+            ".jpg",
+            ".png",
+            ".tif",
+            ".tiff",
+            ".webp",
         }
         file_extension = file_path.suffix.lower()
         if file_extension not in supported_extensions:

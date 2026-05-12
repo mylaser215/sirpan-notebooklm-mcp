@@ -513,3 +513,106 @@ class TestGetSourceFulltextMarkdownParser:
         blocks = fixture_data["integration_content_blocks"]
         expected = fixture_data["integration_expected_markdown"]
         assert _render_markdown_from_blocks(blocks) == expected
+
+    def test_36kb_fixture_table_smoke_regression(self):
+        """Regression: 36KB fixture tables render without crash + emit table syntax.
+
+        v4 결함 픽스 마무리 (단교차삼단시공 ATOM-1) 회귀 보강. 33KB 통합 회귀
+        (test_render_2kb_fixture_full 및 36KB 통합)는 H1/H2/H3/bullets 위주
+        였고 표 카운트 회귀 없었음. _parse_table이 표 데이터를 crash 없이
+        처리하고 markdown table syntax(|, |---|)를 생성하는지 smoke 검증.
+        셀 내용 정확성은 별도 결함 가능성으로 본 테스트에서 제외.
+        """
+        import json
+        from pathlib import Path
+
+        from notebooklm_tools.core.sources import _parse_table, _unwrap_content_blocks
+
+        path = (
+            Path(__file__).parent.parent / "fixtures" / "source_fulltext_36kb_full.json"
+        )
+        with path.open(encoding="utf-8") as f:
+            data = json.load(f)
+        blocks = _unwrap_content_blocks(data["content_blocks"])
+
+        tables = [
+            b
+            for b in blocks
+            if isinstance(b, list)
+            and len(b) >= 5
+            and b[2] is None
+            and b[3] is None
+            and isinstance(b[4], list)
+        ]
+        assert len(tables) >= 1, (
+            f"36KB fixture should contain at least 1 table (found {len(tables)})"
+        )
+
+        for i, table_block in enumerate(tables):
+            table_data = table_block[4]
+            rendered = _parse_table(table_data)
+            assert rendered.startswith("|"), (
+                f"table {i}: expected leading pipe, got: {rendered[:80]!r}"
+            )
+            assert "|---" in rendered, (
+                f"table {i}: expected separator row, got: {rendered[:200]!r}"
+            )
+
+
+def test_register_file_source_payload_structure_v4_regression():
+    """v4 결함 회귀 방지 — register RPC (o4cbdc) params 3-slot+nested 구조.
+
+    NLM 웹의 정확한 payload 형태 (사용자 캡쳐 Image #41, 260512):
+        [[[filename]], notebook_id, [2, None, None, [1, None×10, [1]]]]
+    이전 4-slot 분리 구조는 markdown 파서 라우팅 실패 원인. 본 테스트가 깨지면
+    register RPC가 옛 구조로 회귀 — markdown 파일 업로드 시 plain text로 저장됨.
+    """
+    from unittest.mock import MagicMock
+
+    from notebooklm_tools.core.sources import SourceMixin
+
+    client = MagicMock()
+    client.RPC_ADD_SOURCE_FILE = "o4cbdc"
+
+    captured: dict = {}
+
+    def fake_call_rpc(rpc_name, params, path=None, **kw):
+        captured["rpc"] = rpc_name
+        captured["params"] = params
+        captured["path"] = path
+        return ["captured-source-id"]
+
+    client._call_rpc = fake_call_rpc
+
+    result = SourceMixin._register_file_source(client, "nb-uuid", "test_file.md")
+
+    assert captured["rpc"] == "o4cbdc"
+    assert captured["path"] == "/notebook/nb-uuid"
+
+    params = captured["params"]
+    assert len(params) == 3, (
+        f"v4 결함 회귀: top-level 3 slots 기대 (NLM 웹 형식), got {len(params)}. "
+        "4-slot 분리 구조면 markdown 파서 라우팅 실패."
+    )
+    assert params[0] == [["test_file.md"]]
+    assert params[1] == "nb-uuid"
+
+    slot3 = params[2]
+    assert isinstance(slot3, list) and len(slot3) == 4, (
+        f"slot 3 nested 구조 [2, None, None, [...]] 기대, got {slot3!r}"
+    )
+    assert slot3[0] == 2
+    assert slot3[1] is None
+    assert slot3[2] is None
+
+    opts = slot3[3]
+    assert isinstance(opts, list) and len(opts) == 12, (
+        f"내부 opts 12 elements 기대 (v4 회귀 1 부족 검증), got {len(opts)}"
+    )
+    assert opts[0] == 1
+    assert opts[-1] == [1]
+    assert all(o is None for o in opts[1:-1]), (
+        f"opts 중간은 모두 None 기대, got {opts!r}"
+    )
+
+    assert result == "captured-source-id"

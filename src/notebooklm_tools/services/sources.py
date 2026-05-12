@@ -22,26 +22,56 @@ DRIVE_MIME_TYPES = {
 }
 
 # Mirrors the supported_extensions check in core/sources.py:add_file.
-# Duplicated here so replace_source_file can fail BEFORE the destructive
-# delete step (Pre-check pattern — load-bearing safety, not redundancy).
+# NLM 공식 지원 목록 (사용자 캡쳐 Image #43, 260512 v4 결함 학습 — 허브 참조).
+# 두 곳 일치 강제 (Pre-check pattern). 코드/구조화 데이터(.py/.json/.ts)는 NLM 미지원.
 SUPPORTED_FILE_EXTS = frozenset(
     {
+        # Documents (NLM 공식)
         ".pdf",
         ".txt",
         ".md",
         ".docx",
         ".csv",
-        ".mp3",
-        ".m4a",
-        ".wav",
+        ".pptx",
+        ".epub",
+        # Audio (NLM 공식)
+        ".3g2",
+        ".3gp",
         ".aac",
+        ".aif",
+        ".aifc",
+        ".aiff",
+        ".amr",
+        ".au",
+        ".cda",
+        ".m4a",
+        ".mid",
+        ".mp3",
+        ".mpeg",
         ".ogg",
         ".opus",
+        ".ra",
+        ".ram",
+        ".snd",
+        ".wav",
+        ".wma",
+        # Video (NLM 공식)
+        ".avi",
         ".mp4",
-        ".jpg",
-        ".jpeg",
-        ".png",
+        # Images (NLM 공식)
+        ".avif",
+        ".bmp",
         ".gif",
+        ".heic",
+        ".heif",
+        ".ico",
+        ".jp2",
+        ".jpe",
+        ".jpeg",
+        ".jpg",
+        ".png",
+        ".tif",
+        ".tiff",
         ".webp",
     }
 )
@@ -225,7 +255,18 @@ def add_source(
                 raise ValidationError("file_path is required for source_type='file'")
             result = client.add_file(notebook_id, file_path, wait=wait, wait_timeout=wait_timeout)
             fallback_title = str(file_path).split("/")[-1]
-            return _extract_result(result, "file", fallback_title)
+            # title preservation (v5 결함 픽스, 260512): NLM은 add_file 시 filename을 title로 사용.
+            # 사용자 지정 title 있으면 별도 rename RPC (b7Wfje) 호출. add_file은 항상 *Source-area*
+            # 등록이므로 source_type 인자 생략 (None) — 일반 Source RPC 라우팅. Real Note(list_notes
+            # 멤버)는 add_file로 안 들어오므로 update_note 분기 불필요. best-effort — 실패 시 main 계속.
+            if title and isinstance(result, dict) and result.get("id"):
+                try:
+                    renamed = client.rename_source(notebook_id, result["id"], title)
+                    if renamed:
+                        result["title"] = title
+                except Exception:  # noqa: BLE001 — best-effort
+                    pass
+            return _extract_result(result, "file", title or fallback_title)
 
     except (ValidationError, ServiceError):
         raise
