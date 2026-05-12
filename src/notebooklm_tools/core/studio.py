@@ -9,6 +9,41 @@ from .base import BaseClient
 from .utils import parse_timestamp
 
 
+def _studio_slot1() -> list[Any]:
+    """V5 baseline slot1 for R7cb6c (RPC_CREATE_STUDIO) + gArtLc (POLL_STUDIO).
+
+    260512 Chrome DevTools 라이브 캡쳐 9건 (audio/video/report/slide/flashcards/
+    quiz/infographic/datatable + poll) 전수 일치 확인. nested = 12-요소.
+
+    회귀 가드: tests/core/test_rpc_payload_v5_regression.py ATOM-10~18.
+    """
+    return [
+        2,
+        None,
+        None,
+        [1, None, None, None, None, None, None, None, None, None, None, [1]],
+        [[1, 4, 2, 3, 6]],
+    ]
+
+
+def _delete_studio_slot1() -> list[Any]:
+    """V5 baseline slot0 for Studio modify/delete RPCs (V5N4be, KmcKPe).
+
+    260512 라이브 캡쳐 전수 동일: nested = **11-요소** (V5N4be 일반+마인드맵 +
+    KmcKPe slide revise). R7cb6c/gArtLc의 12-요소와 1-요소 차이.
+    가설: NLM 도메인에서 modify/delete RPC = 11-요소, create/poll RPC = 12-요소.
+
+    회귀 가드: ATOM-8 (mind_map UUID) + ATOM-20 (일반 artifact) + ATOM-21 (slide revise).
+    """
+    return [
+        2,
+        None,
+        None,
+        [1, None, None, None, None, None, None, None, None, None, [1]],
+        [[1, 4, 2, 3, 6]],
+    ]
+
+
 class _SourceLookupProtocol(Protocol):
     def get_notebook_sources_with_types(self, notebook_id: str) -> list[dict[str, Any]]: ...
 
@@ -169,13 +204,24 @@ class StudioMixin(BaseClient):
         # Build source IDs in the simpler format: [[id1], [id2], ...]
         sources_simple = [[sid] for sid in source_ids]
 
-        audio_options = [
-            None,
-            [focus_prompt, length_code, None, sources_simple, language, None, format_code],
-        ]
+        # v5 후속(260512): NLM 웹은 default 호출 시 옵션 inner를 4-요소로 압축
+        # (length/lang/format 자리 제거). 잠복 결함 차단 위해 NLM과 동일 분기.
+        is_default = (
+            not focus_prompt
+            and length_code == 2  # AUDIO_LENGTH_DEFAULT
+            and format_code == 1  # AUDIO_FORMAT_DEEP_DIVE
+            and language == "en"
+        )
+        if is_default:
+            audio_options = [None, [None, None, None, sources_simple]]
+        else:
+            audio_options = [
+                None,
+                [focus_prompt or None, length_code, None, sources_simple, language, None, format_code],
+            ]
 
         params = [
-            [2],
+            _studio_slot1(),
             notebook_id,
             [None, None, self.STUDIO_TYPE_AUDIO, sources_nested, None, None, audio_options],
         ]
@@ -244,7 +290,7 @@ class StudioMixin(BaseClient):
         video_options = [None, None, inner_options]
 
         params = [
-            [2],
+            _studio_slot1(),
             notebook_id,
             [
                 None,
@@ -286,8 +332,8 @@ class StudioMixin(BaseClient):
 
     def poll_studio_status(self, notebook_id: str) -> list[dict[str, Any]]:
         """Poll for studio content (audio/video overviews) status."""
-        # Poll params: [[2], notebook_id, 'NOT artifact.status = "ARTIFACT_STATUS_SUGGESTED"']
-        params = [[2], notebook_id, 'NOT artifact.status = "ARTIFACT_STATUS_SUGGESTED"']
+        # v5 후속(260512): 라이브 캡쳐로 slot1이 Studio 도메인 공통 패턴 확정 (gArtLc baseline).
+        params = [_studio_slot1(), notebook_id, 'NOT artifact.status = "ARTIFACT_STATUS_SUGGESTED"']
         result = self._call_rpc(self.RPC_POLL_STUDIO, params, path=f"/notebook/{notebook_id}")
 
         artifacts = []
@@ -501,9 +547,11 @@ class StudioMixin(BaseClient):
         Returns:
             True on success, False on failure
         """
-        # 1. Try standard deletion (Audio, Video, etc.)
+        # 1. Try standard deletion (Audio, Video, Report, mindmap, etc.)
+        # v5 후속(260512) — 라이브 캡쳐로 2-slot + slot0 nested+extra 확정.
+        # 마인드맵·일반 artifact가 V5N4be RPC 공유 → 동일 11-요소 nested 사용.
         try:
-            params = [[2], artifact_id]
+            params = [_delete_studio_slot1(), artifact_id]
             result = self._call_rpc(self.RPC_DELETE_STUDIO, params)
             if result is not None:
                 return True
@@ -543,18 +591,10 @@ class StudioMixin(BaseClient):
                     break
 
         # 2. Step 1: UUID-based deletion (v5: V5N4be = RPC_DELETE_STUDIO)
-        # NLM 웹 baseline (260512 캡쳐): 2-slot [옵션_nested, mind_map_uuid].
-        # notebook_id는 path로만 전달; params에서 제거.
-        params_v2 = [
-            [
-                2,
-                None,
-                None,
-                [1, None, None, None, None, None, None, None, None, None, None, [1]],
-                [[1, 4, 2, 3, 6]],
-            ],
-            mind_map_id,
-        ]
+        # NLM 웹 baseline (260512 라이브 캡쳐): 2-slot [옵션_nested, mind_map_uuid].
+        # 마인드맵·일반 artifact가 V5N4be RPC 공유 → 동일 11-요소 nested 사용.
+        # (v5 초기 박제 12-요소는 라이브 검증 없이 채택했던 잘못된 baseline, 260512 정정.)
+        params_v2 = [_delete_studio_slot1(), mind_map_id]
         self._call_rpc(self.RPC_DELETE_MIND_MAP, params_v2, f"/notebook/{notebook_id}")
 
         # 3. Step 2: Timestamp-based sync/deletion (cFji9)
@@ -575,9 +615,20 @@ class StudioMixin(BaseClient):
         Returns:
             True on success, False on failure
         """
-        # Payload structure discovered via browser network intercept:
-        # [[ "<artifact_id>", "<new_title>" ], [["title"]]]
-        params = [[artifact_id, new_title], [["title"]]]
+        # v5 후속(260512) — 라이브 캡쳐로 5-slot 구조 확정 (2-slot은 결함).
+        # NLM 웹 baseline:
+        #   slot0 = [artifact_id, new_title]
+        #   slot1 = [["title"]]  (변경 필드 명세)
+        #   slot2 = None
+        #   slot3 = [2, None×10, [1]]  (RPC별 변형 옵션, V4_NESTED 첫 요소 1→2)
+        #   slot4 = [[1, 4, 2, 3, 6]]  (Studio 도메인 extra opts)
+        params = [
+            [artifact_id, new_title],
+            [["title"]],
+            None,
+            [2, None, None, None, None, None, None, None, None, None, None, [1]],
+            [[1, 4, 2, 3, 6]],
+        ]
 
         try:
             result = self._call_rpc(self.RPC_RENAME_ARTIFACT, params)
@@ -603,9 +654,10 @@ class StudioMixin(BaseClient):
         Returns:
             Dict with new artifact_id, title, and status, or None on failure
         """
-        # RPC KmcKPe params: [[2], artifact_id, [[[slide_index, instruction], ...]]]
+        # v5 후속(260513) — 라이브 캡쳐로 slot0 = V5N4be DELETE와 동일 11-요소 nested 확정.
+        # NLM 웹 baseline: [_delete_studio_slot1(), artifact_id, [instruction_pairs]].
         instruction_pairs = [[idx, text] for idx, text in slide_instructions]
-        params = [[2], artifact_id, [instruction_pairs]]
+        params = [_delete_studio_slot1(), artifact_id, [instruction_pairs]]
 
         result = self._call_rpc(
             self.RPC_REVISE_SLIDE_DECK,
@@ -650,18 +702,28 @@ class StudioMixin(BaseClient):
         # Build source IDs in the nested format: [[[id1]], [[id2]], ...]
         sources_nested = [[[sid]] for sid in source_ids]
 
-        # Options at position 14: [[focus_prompt, language, null, orientation, detail_level, visual_style]]
-        # Captured RPC structure: [[null, "en", null, 1, 2, 2]]
-        infographic_options = [
-            [
-                focus_prompt or None,
-                language,
-                None,
-                orientation_code,
-                detail_level_code,
-                visual_style_code,
+        # v5 후속(260512): NLM 웹 default 호출은 inner 5-요소 (lang/vstyle 자리 제거).
+        # default 시 baseline `[[None, None, None, orient, detail]]`로 송신.
+        is_default = (
+            not focus_prompt
+            and language == "en"
+            and visual_style_code == 1  # INFOGRAPHIC_STYLE_AUTO_SELECT
+        )
+        if is_default:
+            infographic_options = [
+                [None, None, None, orientation_code, detail_level_code]
             ]
-        ]
+        else:
+            infographic_options = [
+                [
+                    focus_prompt or None,
+                    language,
+                    None,
+                    orientation_code,
+                    detail_level_code,
+                    visual_style_code,
+                ]
+            ]
 
         content = [
             None,
@@ -681,7 +743,7 @@ class StudioMixin(BaseClient):
             infographic_options,  # position 14
         ]
 
-        params = [[2], notebook_id, content]
+        params = [_studio_slot1(), notebook_id, content]
 
         result = self._call_rpc(self.RPC_CREATE_STUDIO, params, f"/notebook/{notebook_id}")
 
@@ -728,8 +790,17 @@ class StudioMixin(BaseClient):
         # Build source IDs in the nested format: [[[id1]], [[id2]], ...]
         sources_nested = [[[sid]] for sid in source_ids]
 
-        # Options at position 16: [[focus_prompt, language, format, length]]
-        slide_deck_options = [[focus_prompt or None, language, format_code, length_code]]
+        # v5 후속(260512): NLM 웹 default 호출은 옵션 inner를 빈 배열로 송신.
+        is_default = (
+            not focus_prompt
+            and language == "en"
+            and format_code == 1  # SLIDE_DECK_FORMAT_DETAILED
+            and length_code == 3  # SLIDE_DECK_LENGTH_DEFAULT
+        )
+        if is_default:
+            slide_deck_options = [[]]
+        else:
+            slide_deck_options = [[focus_prompt or None, language, format_code, length_code]]
 
         content = [
             None,
@@ -751,7 +822,7 @@ class StudioMixin(BaseClient):
             slide_deck_options,  # position 16
         ]
 
-        params = [[2], notebook_id, content]
+        params = [_studio_slot1(), notebook_id, content]
 
         result = self._call_rpc(self.RPC_CREATE_STUDIO, params, f"/notebook/{notebook_id}")
 
@@ -844,7 +915,10 @@ class StudioMixin(BaseClient):
 
         config = format_configs[report_format]
 
-        # Options at position 7: [null, [title, desc, null, sources, lang, prompt, null, True]]
+        # v5 후속(260512) B급 픽스: NLM 웹 baseline inner 7-요소
+        # `[title, desc, None, sources, lang, prompt, 1]` — 우리 코드의 8-요소
+        # `[..., prompt, None, True]`는 Protobuf 타입 차이(`true` vs `1`) +
+        # 슬롯 1칸 밀림 위험. NLM 자문 권고 따라 정수 1 명시.
         report_options = [
             None,
             [
@@ -854,8 +928,7 @@ class StudioMixin(BaseClient):
                 sources_simple,
                 language,
                 config["prompt"],
-                None,
-                True,
+                1,
             ],
         ]
 
@@ -870,7 +943,7 @@ class StudioMixin(BaseClient):
             report_options,
         ]
 
-        params = [[2], notebook_id, content]
+        params = [_studio_slot1(), notebook_id, content]
 
         result = self._call_rpc(self.RPC_CREATE_STUDIO, params, f"/notebook/{notebook_id}")
 
@@ -943,7 +1016,7 @@ class StudioMixin(BaseClient):
             flashcard_options,  # position 9
         ]
 
-        params = [[2], notebook_id, content]
+        params = [_studio_slot1(), notebook_id, content]
 
         result = self._call_rpc(self.RPC_CREATE_STUDIO, params, f"/notebook/{notebook_id}")
 
@@ -1021,7 +1094,7 @@ class StudioMixin(BaseClient):
             quiz_options,  # position 9
         ]
 
-        params = [[2], notebook_id, content]
+        params = [_studio_slot1(), notebook_id, content]
 
         result = self._call_rpc(self.RPC_CREATE_STUDIO, params, f"/notebook/{notebook_id}")
 
@@ -1070,8 +1143,12 @@ class StudioMixin(BaseClient):
 
         sources_nested = [[[sid]] for sid in source_ids]
 
-        # Data Table options at position 18: [null, [description, language]]
-        datatable_options = [None, [description, language]]
+        # v5 후속(260512): NLM 웹 default 호출은 inner를 빈 배열로 송신.
+        is_default = not description and language == "en"
+        if is_default:
+            datatable_options = [None, []]
+        else:
+            datatable_options = [None, [description, language]]
 
         content = [
             None,
@@ -1095,7 +1172,7 @@ class StudioMixin(BaseClient):
             datatable_options,  # position 18
         ]
 
-        params = [[2], notebook_id, content]
+        params = [_studio_slot1(), notebook_id, content]
 
         result = self._call_rpc(self.RPC_CREATE_STUDIO, params, f"/notebook/{notebook_id}")
 

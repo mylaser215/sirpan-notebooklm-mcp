@@ -93,3 +93,6 @@ docs/superpowers/
 
 # uv lockfile (library, not app)
 uv.lock
+
+# 임시 캡쳐 분석 자료 (NLM 웹 baseline raw text — baseline은 회귀 테스트에 박제됨)
+.tmp_raw_captures/
