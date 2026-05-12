@@ -639,3 +639,98 @@ class TestReplaceSourceFile:
 
         # delete was called exactly once before the add failure
         assert mock_client.delete_source.call_count == 1
+
+    # ──────────────────────────────────────────────────────────────────────
+    # v6 중기 ①: fallback_to_text 옵션 (미지원 확장자 자동 text 폴백)
+    # ──────────────────────────────────────────────────────────────────────
+
+    def test_unsupported_ext_with_fallback_succeeds(self, mock_client, tmp_path):
+        """`.json` + fallback_to_text=True → text-mode upload + mode='text'."""
+        file_path = tmp_path / "settings.json"
+        file_path.write_text('{"key": "value"}', encoding="utf-8")
+
+        mock_client.get_notebook_sources_with_types.return_value = []
+        mock_client.add_text_source.return_value = {"id": "src-new", "title": "settings.json"}
+
+        result = replace_source_file(
+            mock_client, "nb-1", "src-old", str(file_path), fallback_to_text=True
+        )
+
+        # add_text_source was called with the file contents
+        mock_client.add_text_source.assert_called_once()
+        call_args = mock_client.add_text_source.call_args
+        assert call_args[0][1] == '{"key": "value"}'  # text content
+        # add_file must NOT be called when fallback fires
+        mock_client.add_file.assert_not_called()
+
+        assert result["mode"] == "text"
+        assert result["new_source_id"] == "src-new"
+        assert "fallback to text mode" in result["message"]
+
+    def test_unsupported_ext_without_fallback_raises(self, mock_client, tmp_path):
+        """`.json` + default fallback_to_text=False → ValidationError (호환 회귀 가드)."""
+        file_path = tmp_path / "settings.json"
+        file_path.write_text('{"key": "value"}', encoding="utf-8")
+
+        with pytest.raises(ValidationError, match="Unsupported file type"):
+            replace_source_file(mock_client, "nb-1", "src-old", str(file_path))
+
+        # Load-bearing: no destructive call when pre-check fails
+        mock_client.delete_source.assert_not_called()
+        mock_client.add_file.assert_not_called()
+        mock_client.add_text_source.assert_not_called()
+
+    def test_fallback_preserves_title(self, mock_client, tmp_path):
+        """폴백 모드에서도 title preservation 동작 (regular file 경로와 일관)."""
+        file_path = tmp_path / "core.py"
+        file_path.write_text("def hello(): pass\n", encoding="utf-8")
+
+        mock_client.get_notebook_sources_with_types.return_value = [
+            {"id": "src-old", "title": "Original Core", "source_type_name": "Text"},
+        ]
+        mock_client.add_text_source.return_value = {
+            "id": "src-new",
+            "title": "Original Core",
+        }
+
+        result = replace_source_file(
+            mock_client, "nb-1", "src-old", str(file_path), fallback_to_text=True
+        )
+
+        # add_text_source called with preserved title (positional arg index 2)
+        call_args = mock_client.add_text_source.call_args
+        assert call_args[0][2] == "Original Core"
+        assert result["title"] == "Original Core"
+        assert result["mode"] == "text"
+
+    def test_fallback_binary_decode_failure_skips_delete(self, mock_client, tmp_path):
+        """폴백 모드 UTF-8 디코드 실패 → ValidationError + delete 미호출 (pre-delete 안전)."""
+        bin_path = tmp_path / "weird.bin"
+        bin_path.write_bytes(b"\xff\xfe\x00\x80\xff")  # invalid utf-8 bytes
+
+        with pytest.raises(ValidationError, match="Cannot decode as UTF-8"):
+            replace_source_file(
+                mock_client, "nb-1", "src-old", str(bin_path), fallback_to_text=True
+            )
+
+        # Load-bearing: utf-8 decode failure must surface before delete
+        mock_client.delete_source.assert_not_called()
+        mock_client.add_file.assert_not_called()
+        mock_client.add_text_source.assert_not_called()
+
+    def test_fallback_delete_success_add_text_failure_surfaces(self, mock_client, tmp_path):
+        """폴백 모드 delete 성공 + add_text 실패 → 명시적 ServiceError (atomic 일관)."""
+        file_path = tmp_path / "settings.json"
+        file_path.write_text('{"k": 1}', encoding="utf-8")
+
+        mock_client.get_notebook_sources_with_types.return_value = []
+        mock_client.delete_source.return_value = True
+        mock_client.add_text_source.side_effect = RuntimeError("text upload failed")
+
+        with pytest.raises(ServiceError, match="delete succeeded but add failed"):
+            replace_source_file(
+                mock_client, "nb-1", "src-old", str(file_path), fallback_to_text=True
+            )
+
+        # delete was called exactly once before the add_text failure
+        assert mock_client.delete_source.call_count == 1

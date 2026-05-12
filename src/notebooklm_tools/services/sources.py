@@ -2,7 +2,7 @@
 
 import urllib.parse
 from pathlib import Path
-from typing import Any, TypedDict
+from typing import Any, Literal, TypedDict
 
 from ..core.client import NotebookLMClient
 from .errors import ServiceError, ValidationError
@@ -151,6 +151,7 @@ class ReplaceSourceFileResult(TypedDict):
     title: str
     file_path: str
     message: str
+    mode: Literal["file", "text"]
 
 
 def validate_source_type(source_type: str) -> None:
@@ -784,6 +785,8 @@ def replace_source_file(
     notebook_id: str,
     source_id: str,
     file_path: str,
+    *,
+    fallback_to_text: bool = False,
 ) -> ReplaceSourceFileResult:
     """Replace an existing source by deleting it and uploading a new local file.
 
@@ -796,18 +799,30 @@ def replace_source_file(
     delete step. Without it, a missing/invalid file would surface only after
     the delete succeeds, leaving the source permanently lost.
 
+    When ``fallback_to_text=True``, unsupported extensions (e.g. ``.json``,
+    ``.py``) are routed to a text-mode upload: the file contents are read as
+    UTF-8 and uploaded via ``add_source(source_type="text")``. UTF-8 decode
+    failure surfaces as ``ValidationError`` *before* the delete step (pre-delete
+    safety). Default ``False`` preserves the original strict-extension behavior.
+
     Args:
         client: Authenticated NotebookLM client
         notebook_id: Notebook UUID containing the source
         source_id: Source UUID to replace
         file_path: Path to the local file to upload as the replacement
+        fallback_to_text: Opt-in — route unsupported extensions to a text
+            upload (UTF-8 only). Default ``False``.
 
     Returns:
-        ReplaceSourceFileResult with old/new source IDs, title, and path.
+        ReplaceSourceFileResult with old/new source IDs, title, path, and
+        ``mode`` (``"file"`` for the standard path, ``"text"`` when the
+        fallback fired).
 
     Raises:
-        ValidationError: If file_path is missing, not a file, empty, or has
-            an unsupported extension (pre-check, before delete).
+        ValidationError: If file_path is missing, not a file, empty, has
+            an unsupported extension (and ``fallback_to_text=False``), or
+            cannot be decoded as UTF-8 (with ``fallback_to_text=True``).
+            All raised BEFORE any delete.
         ServiceError: If delete or add fails. If delete succeeded but add
             failed, the error message and ``user_message`` make this state
             explicit (the original source is gone).
@@ -830,12 +845,24 @@ def replace_source_file(
             user_message=f"File is empty: {file_path}",
         )
     ext = p.suffix.lower()
+    use_text_fallback = False
+    text_content: str | None = None
     if ext not in SUPPORTED_FILE_EXTS:
-        raise ValidationError(
-            f"Unsupported file type: {ext}",
-            user_message=f"Unsupported file type: {ext}",
-            hint=f"Supported types: {', '.join(sorted(SUPPORTED_FILE_EXTS))}",
-        )
+        if not fallback_to_text:
+            raise ValidationError(
+                f"Unsupported file type: {ext}",
+                user_message=f"Unsupported file type: {ext}",
+                hint=f"Supported types: {', '.join(sorted(SUPPORTED_FILE_EXTS))}",
+            )
+        try:
+            text_content = p.read_text(encoding="utf-8")
+        except UnicodeDecodeError as e:
+            raise ValidationError(
+                f"Cannot decode as UTF-8 for text fallback: {file_path}",
+                user_message="File contents are not valid UTF-8 text.",
+                hint="fallback_to_text requires a text-decodable file.",
+            ) from e
+        use_text_fallback = True
 
     # 2. Title preservation (best-effort, non-fatal)
     preserved_title: str | None = None
@@ -852,16 +879,26 @@ def replace_source_file(
     # 3. Delete the existing source (Composition — propagates ServiceError)
     delete_source(client, source_id, notebook_id=notebook_id)
 
-    # 4. Add the new file (Composition). On failure, the original source is
+    # 4. Add the new source (Composition). On failure, the original source is
     # already gone — surface that explicitly so the user knows to re-add.
     try:
-        add_res = add_source(
-            client,
-            notebook_id,
-            "file",
-            file_path=str(p),
-            title=preserved_title,
-        )
+        if use_text_fallback:
+            assert text_content is not None  # narrowed by use_text_fallback branch
+            add_res = add_source(
+                client,
+                notebook_id,
+                "text",
+                text=text_content,
+                title=preserved_title or p.name,
+            )
+        else:
+            add_res = add_source(
+                client,
+                notebook_id,
+                "file",
+                file_path=str(p),
+                title=preserved_title,
+            )
     except (ValidationError, ServiceError) as e:
         raise ServiceError(
             f"Replace failed: delete succeeded but add failed: {e}",
@@ -869,14 +906,17 @@ def replace_source_file(
                 "Source was deleted but the replacement upload failed. "
                 "The original source is gone; please re-add the file manually."
             ),
-            hint="Verify the file path and retry add_source with source_type='file'.",
+            hint="Verify the file path and retry add_source.",
         ) from e
 
+    mode: Literal["file", "text"] = "text" if use_text_fallback else "file"
+    fallback_suffix = " (fallback to text mode)" if use_text_fallback else ""
     return {
         "notebook_id": notebook_id,
         "old_source_id": source_id,
         "new_source_id": add_res["source_id"],
         "title": add_res["title"],
         "file_path": str(p),
-        "message": f"Replaced source {source_id} with {add_res['source_id']}",
+        "message": f"Replaced source {source_id} with {add_res['source_id']}{fallback_suffix}",
+        "mode": mode,
     }

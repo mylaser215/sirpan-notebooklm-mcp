@@ -235,6 +235,7 @@ def source_replace_file(
     source_id: str,
     file_path: str,
     confirm: bool = False,
+    fallback_to_text: bool = False,
 ) -> ResultDict:
     """Replace an existing source by deleting it and uploading a new local file.
 
@@ -247,12 +248,20 @@ def source_replace_file(
     supported extension before the destructive delete so a missing/invalid
     file cannot orphan the source.
 
+    When ``fallback_to_text=True``, unsupported extensions (e.g. ``.json``,
+    ``.py``) are routed to a text-mode upload — the file contents are read
+    as UTF-8 and uploaded as a text source. Default ``False`` preserves the
+    strict-extension behavior. The response ``mode`` field reports which
+    path was taken (``"file"`` or ``"text"``).
+
     Args:
         notebook_id: Notebook UUID containing the source
         source_id: Source UUID to replace
         file_path: Absolute path to the local file to upload
         confirm: Must be True after user approval (replace is destructive —
             the old source is deleted before the new file is uploaded)
+        fallback_to_text: Opt-in — route unsupported extensions to a text
+            upload (UTF-8 only). Default ``False``.
     """
     if not confirm:
         return error_result(
@@ -263,7 +272,11 @@ def source_replace_file(
     try:
         client = get_client()
         result = sources_service.replace_source_file(
-            client, notebook_id, source_id, file_path
+            client,
+            notebook_id,
+            source_id,
+            file_path,
+            fallback_to_text=fallback_to_text,
         )
         return {"status": "success", **result}
     except ValidationError as e:

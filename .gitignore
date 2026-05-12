@@ -3,6 +3,9 @@ __pycache__/
 *.py[cod]
 *$py.class
 *.so
+
+# NLM RAG 가공본 (scripts/generate_py_md.py 산출물 — 빌드 아티팩트, v6 중기 ②)
+*.py.md
 .Python
 build/
 develop-eggs/

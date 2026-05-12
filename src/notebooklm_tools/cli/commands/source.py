@@ -342,6 +342,11 @@ def replace_source_file_cmd(
     source_id: str = typer.Argument(..., help="Source ID to replace"),
     file_path: str = typer.Argument(..., help="Local file path to upload as replacement"),
     confirm: bool = typer.Option(False, "--confirm", "-y", help="Skip confirmation"),
+    fallback_to_text: bool = typer.Option(
+        False,
+        "--fallback-to-text",
+        help="Route unsupported extensions to a text upload (UTF-8 only).",
+    ),
     profile: str | None = typer.Option(None, "--profile", "-p", help="Profile to use"),
 ) -> None:
     """Replace an existing source with a new local file upload.
@@ -350,8 +355,12 @@ def replace_source_file_cmd(
     delete + add transaction (the source_id changes after replacement).
     Pre-checks file existence/size/extension before the destructive delete.
 
+    Pass ``--fallback-to-text`` to route unsupported extensions (e.g.
+    ``.json``, ``.py``) to a text-mode upload (UTF-8 only).
+
     Example:
         nlm source replace-file <notebook-id> <source-id> ./new.md --confirm
+        nlm source replace-file <notebook-id> <source-id> ./settings.json --confirm --fallback-to-text
     """
     notebook_id = get_alias_manager().resolve(notebook_id)
     source_id = get_alias_manager().resolve(source_id)
@@ -366,11 +375,16 @@ def replace_source_file_cmd(
     try:
         with get_client(profile) as client:
             result = sources_service.replace_source_file(
-                client, notebook_id, source_id, file_path
+                client,
+                notebook_id,
+                source_id,
+                file_path,
+                fallback_to_text=fallback_to_text,
             )
+        mode_label = " [yellow](text fallback)[/yellow]" if result.get("mode") == "text" else ""
         console.print(
-            f"[green]✓[/green] Replaced source. Old: {result['old_source_id']} → "
-            f"New: {result['new_source_id']}"
+            f"[green]✓[/green] Replaced source{mode_label}. "
+            f"Old: {result['old_source_id']} → New: {result['new_source_id']}"
         )
         console.print(f"[dim]Title: {result['title']}[/dim]")
     except (ServiceError, NLMError) as e:
