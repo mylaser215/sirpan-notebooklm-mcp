@@ -15,6 +15,7 @@ This mixin provides source-related operations:
 HTTP resumable upload implementation adapted from notebooklm-py.
 """
 
+import logging
 import textwrap
 import time
 from collections.abc import Iterator
@@ -28,6 +29,8 @@ from .base import SOURCE_ADD_TIMEOUT, BaseClient
 from .errors import RPCError
 from .exceptions import FileUploadError, FileValidationError
 from .retry import execute_with_retry
+
+logger = logging.getLogger(__name__)
 
 
 class _NotebookLookupProtocol(Protocol):
@@ -1071,6 +1074,7 @@ class SourceMixin(BaseClient):
         *,
         notebook_id: str | None = None,
         source_type: int | None = None,
+        raw_markdown: bool = False,
     ) -> dict[str, Any]:
         """Get the full text content of a source.
 
@@ -1087,6 +1091,13 @@ class SourceMixin(BaseClient):
             source_id: The source UUID
             notebook_id: Optional notebook UUID — required for note routing
             source_type: Optional source type code — when 8, uses note fallback
+            raw_markdown: When True, reconstruct markdown from the hizoJc tree
+                (paragraph flags 4/5/6 → H1~H3, bullet meta → dynamic indent,
+                segment format flags → bold/italic/inline code, tables).
+                When False (default), return plain text concatenation for
+                backwards compatibility with embedding/search callers.
+                Use True only for callers that need markdown fidelity
+                (notebook_clone). Note fallback (generated_text) is unaffected.
 
         Returns:
             Dict with content, title, source_type, and char_count
@@ -1155,16 +1166,22 @@ class SourceMixin(BaseClient):
             if len(result) > 3 and isinstance(result[3], list):
                 content_wrapper = result[3]
                 if len(content_wrapper) > 0 and isinstance(content_wrapper[0], list):
-                    content_blocks = content_wrapper[0]
-                    # Collect all text from content blocks
-                    text_parts = []
-                    for block in content_blocks:
-                        if isinstance(block, list):
-                            # Each block is [start, end, content_data, ...]
-                            # Extract all text strings recursively
-                            texts = self._extract_all_text(block)
-                            text_parts.extend(texts)
-                    content = "\n\n".join(text_parts)
+                    if raw_markdown:
+                        # Reconstruct markdown preserving paragraph flags,
+                        # bullet depth, format flags, and tables. The helper
+                        # auto-unwraps wrapper lists to reach the real blocks.
+                        content = _render_markdown_from_blocks(content_wrapper)
+                    else:
+                        content_blocks = content_wrapper[0]
+                        # Collect all text from content blocks (plain text fallback)
+                        text_parts = []
+                        for block in content_blocks:
+                            if isinstance(block, list):
+                                # Each block is [start, end, content_data, ...]
+                                # Extract all text strings recursively
+                                texts = self._extract_all_text(block)
+                                text_parts.extend(texts)
+                        content = "\n\n".join(text_parts)
 
         return {
             "content": content,
@@ -1183,3 +1200,240 @@ class SourceMixin(BaseClient):
             elif isinstance(item, list):
                 texts.extend(self._extract_all_text(item))
         return texts
+
+
+# ---------------------------------------------------------------------------
+# hizoJc RPC tree → markdown parser helpers (module-level, pure)
+# ---------------------------------------------------------------------------
+#
+# Reconstructs markdown from the raw hizoJc response tree, preserving
+# paragraph flags (4/5/6 → H1/H2/H3), bullet metadata ("104":depth →
+# "  "*depth indent), segment format flags ([true]=bold,
+# [null,true]=italic, 8th-true=inline code), and tables.
+#
+# NOT wired into get_source_fulltext() yet — that hook lands in Batch 2
+# via the raw_markdown=True parameter. Pure functions so tests exercise
+# them without instantiating NotebookLMClient.
+
+
+_ITALIC = "*"  # Obsidian _-conflict avoidance — never use underscore for italic
+
+
+def _extract_text_recursive(data: Any) -> str:
+    """Module-level plain-text fallback for Graceful Degradation.
+
+    Mirrors SourceMixin._extract_all_text but module-level so the parser
+    helpers (also module-level) can fall back without a client instance.
+    """
+    if isinstance(data, str):
+        return data
+    if isinstance(data, list):
+        return " ".join(
+            _extract_text_recursive(item) for item in data if item is not None
+        ).strip()
+    return ""
+
+
+def _parse_segment(seg: list) -> str:
+    """One segment ``[seg_start, seg_end, [text, ?format_flags]]`` → markdown inline.
+
+    Format flag positions: 0=bold, 1=italic, 7=inline code. Combinations
+    nest as ``**`bold inline`**``. Italic uses ``*`` (asterisk) only.
+    """
+    try:
+        if not isinstance(seg, list) or len(seg) < 3:
+            return _extract_text_recursive(seg)
+        content = seg[2]
+        if not isinstance(content, list) or len(content) == 0:
+            return ""
+        text = content[0] if isinstance(content[0], str) else ""
+        flags = content[1] if len(content) > 1 and isinstance(content[1], list) else []
+
+        is_bold = len(flags) > 0 and flags[0] is True
+        is_italic = len(flags) > 1 and flags[1] is True
+        is_code = len(flags) > 7 and flags[7] is True
+
+        result = text
+        if is_code:
+            result = f"`{result}`"
+        if is_italic:
+            result = f"{_ITALIC}{result}{_ITALIC}"
+        if is_bold:
+            result = f"**{result}**"
+        return result
+    except Exception as e:  # noqa: BLE001 — Graceful Degradation
+        logger.warning("parser segment: %s @ %r", e, str(seg)[:80])
+        return _extract_text_recursive(seg)
+
+
+def _parse_paragraph(para: list) -> str:
+    """One paragraph block → markdown block.
+
+    Layout: ``[start, end, paragraph_data]`` where
+    ``paragraph_data = [segments, [null, kind], ?, ?bullet_wrapper]``.
+    kind: 4/5/6=H1~H3, 1=normal/bullet (bullet_wrapper present iff bullet).
+    bullet_wrapper inner dict keys: "101"=marker, "103"=item_idx, "104"=depth.
+    """
+    try:
+        if not isinstance(para, list) or len(para) < 3:
+            return _extract_text_recursive(para)
+        paragraph_data = para[2]
+        if not isinstance(paragraph_data, list) or len(paragraph_data) < 2:
+            return _extract_text_recursive(para)
+
+        segments = paragraph_data[0] if isinstance(paragraph_data[0], list) else []
+        flags = paragraph_data[1] if isinstance(paragraph_data[1], list) else [None, 1]
+
+        joined = "".join(_parse_segment(seg) for seg in segments)
+
+        kind = flags[1] if len(flags) > 1 else 1
+        if kind == 4:
+            return f"# {joined}"
+        if kind == 5:
+            return f"## {joined}"
+        if kind == 6:
+            return f"### {joined}"
+        if kind == 1:
+            bullet_meta = None
+            if len(paragraph_data) > 3 and isinstance(paragraph_data[3], list):
+                wrapper = paragraph_data[3]
+                if len(wrapper) > 3 and isinstance(wrapper[3], dict):
+                    bullet_meta = wrapper[3]
+            if bullet_meta:
+                marker = bullet_meta.get("101", "•")
+                depth = bullet_meta.get("104", 0)
+                if not isinstance(depth, int) or depth < 0:
+                    depth = 0
+                indent = "  " * depth
+                if marker == "1.":
+                    item_idx = bullet_meta.get("103", 1)
+                    return f"{indent}{item_idx}. {joined}"
+                return f"{indent}- {joined}"
+            return joined  # normal paragraph
+        # Unknown flag → plain text fallback + warning
+        logger.warning("unknown paragraph flag: %s @ %r", kind, str(para)[:80])
+        return joined
+    except Exception as e:  # noqa: BLE001
+        logger.warning("parser paragraph: %s @ %r", e, str(para)[:80])
+        return _extract_text_recursive(para)
+
+
+def _parse_table(table_data: list) -> str:
+    """Table inner tuple ``[cols, rows, cells]`` → markdown table.
+
+    cells: ``[row0_cells, row1_cells, ...]`` where each cell is
+    ``[start, end, [[text]]]``. First row treated as header.
+    """
+    try:
+        if not isinstance(table_data, list) or len(table_data) < 3:
+            return _extract_text_recursive(table_data)
+        cols = table_data[0]
+        rows = table_data[1]
+        cells = table_data[2]
+        if (
+            not isinstance(cols, int)
+            or not isinstance(rows, int)
+            or not isinstance(cells, list)
+        ):
+            return _extract_text_recursive(table_data)
+
+        def cell_text(cell: Any) -> str:
+            if not isinstance(cell, list) or len(cell) < 3:
+                return ""
+            return _extract_text_recursive(cell[2]).strip()
+
+        lines: list[str] = []
+        if len(cells) > 0:
+            header = cells[0]
+            if isinstance(header, list):
+                header_strs = [cell_text(c) for c in header]
+                lines.append("| " + " | ".join(header_strs) + " |")
+                lines.append("|" + "|".join("---" for _ in header_strs) + "|")
+            for row in cells[1:]:
+                if isinstance(row, list):
+                    row_strs = [cell_text(c) for c in row]
+                    lines.append("| " + " | ".join(row_strs) + " |")
+        return "\n".join(lines)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("parser table: %s @ %r", e, str(table_data)[:80])
+        return _extract_text_recursive(table_data)
+
+
+def _parse_content_block(block: list) -> str:
+    """Dispatch one content block → markdown.
+
+    Table heuristic: ``len(block)==5`` with ``block[2]==block[3]==None``
+    and ``block[4]`` a list. Otherwise treat as paragraph.
+    """
+    try:
+        if not isinstance(block, list):
+            return _extract_text_recursive(block)
+        if (
+            len(block) >= 5
+            and block[2] is None
+            and block[3] is None
+            and isinstance(block[4], list)
+        ):
+            return _parse_table(block[4])
+        return _parse_paragraph(block)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("parser block: %s @ %r", e, str(block)[:80])
+        return _extract_text_recursive(block)
+
+
+def _is_bullet_rendered(rendered: str) -> bool:
+    """Heuristic: rendered block is a bullet (after leading indent)."""
+    stripped = rendered.lstrip(" ")
+    if stripped.startswith("- "):
+        return True
+    head = stripped.split(" ", 1)[0] if " " in stripped else ""
+    return head.endswith(".") and head[:-1].isdigit()
+
+
+def _unwrap_content_blocks(blocks: Any, _max_depth: int = 5) -> list:
+    """Auto-unwrap nested wrapper lists until we reach the real blocks array.
+
+    The hizoJc response wraps content blocks at varying depths: ``result[3]``
+    might be ``[[blocks]]`` (the live RPC shape) or already ``[blocks]``
+    (manually-trimmed fixtures). A real block is ``[start, end, ...]`` so
+    ``blocks[0][0]`` is an int — that's the unwrap stop signal.
+    """
+    for _ in range(_max_depth):
+        if not isinstance(blocks, list) or len(blocks) != 1:
+            break
+        inner = blocks[0]
+        if not isinstance(inner, list) or len(inner) == 0:
+            break
+        first = inner[0]
+        # Real block: [start, end, ...] → first is int. Stop here.
+        if isinstance(first, int):
+            break
+        blocks = inner
+    return blocks if isinstance(blocks, list) else []
+
+
+def _render_markdown_from_blocks(blocks: list) -> str:
+    """Top-level entry: content blocks → full markdown.
+
+    Auto-unwraps wrapper lists (raw hizoJc ``result[3]`` is ``[[blocks]]``).
+    Separator: consecutive bullet blocks join with ``\\n`` (list continuity);
+    otherwise paragraph break ``\\n\\n``.
+    """
+    try:
+        if not isinstance(blocks, list):
+            return _extract_text_recursive(blocks)
+        blocks = _unwrap_content_blocks(blocks)
+        parts: list[str] = []
+        prev_is_bullet = False
+        for block in blocks:
+            rendered = _parse_content_block(block)
+            is_bullet = _is_bullet_rendered(rendered)
+            if parts:
+                sep = "\n" if (prev_is_bullet and is_bullet) else "\n\n"
+                parts.append(sep)
+            parts.append(rendered)
+            prev_is_bullet = is_bullet
+        return "".join(parts)
+    except Exception as e:  # noqa: BLE001
+        logger.warning("parser render: %s @ %r", e, str(blocks)[:80])
+        return _extract_text_recursive(blocks)

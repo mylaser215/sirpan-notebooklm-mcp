@@ -2,6 +2,8 @@
 
 from unittest.mock import MagicMock, patch
 
+import pytest
+
 
 def test_source_mixin_import():
     """Test that SourceMixin can be imported."""
@@ -396,3 +398,118 @@ def test_is_note_type_helper():
     assert _is_note_type(SOURCE_TYPE_PASTED_TEXT) is False
     assert _is_note_type(None) is False
     assert _is_note_type(0) is False
+
+
+# ---------------------------------------------------------------------------
+# Batch 1: get_source_fulltext markdown parser helpers
+# ---------------------------------------------------------------------------
+
+
+class TestGetSourceFulltextMarkdownParser:
+    """Pure module-level parser helpers for hizoJc RPC tree → markdown.
+
+    Covers every transformation rule fixture-driven: paragraph flag 4/5/6
+    → H1/H2/H3, bullet meta 104 → dynamic indent, segment format flags
+    0/1/7 → bold/italic/inline-code, and 2×2 table reconstruction.
+    """
+
+    @pytest.fixture(scope="class")
+    def fixture_data(self) -> dict:
+        import json
+        from pathlib import Path
+
+        path = Path(__file__).parent.parent / "fixtures" / "source_fulltext_2kb.json"
+        with path.open(encoding="utf-8") as f:
+            return json.load(f)
+
+    @pytest.fixture(scope="class")
+    def unit_cases(self, fixture_data: dict) -> dict:
+        return fixture_data["unit_cases"]
+
+    def test_parse_segment_plain(self, unit_cases):
+        from notebooklm_tools.core.sources import _parse_segment
+
+        case = unit_cases["segment_plain"]
+        assert _parse_segment(case["input"]) == case["expected"]
+
+    def test_parse_segment_bold(self, unit_cases):
+        from notebooklm_tools.core.sources import _parse_segment
+
+        case = unit_cases["segment_bold"]
+        assert _parse_segment(case["input"]) == case["expected"]
+
+    def test_parse_segment_italic_asterisk(self, unit_cases):
+        from notebooklm_tools.core.sources import _parse_segment
+
+        case = unit_cases["segment_italic_asterisk"]
+        result = _parse_segment(case["input"])
+        assert result == case["expected"]
+        # Obsidian underscore-conflict avoidance
+        assert "_" not in result.replace(case["input"][2][0], "")
+
+    def test_parse_segment_inline_code(self, unit_cases):
+        from notebooklm_tools.core.sources import _parse_segment
+
+        case = unit_cases["segment_inline_code"]
+        assert _parse_segment(case["input"]) == case["expected"]
+
+    def test_parse_segment_bold_inline_code(self, unit_cases):
+        from notebooklm_tools.core.sources import _parse_segment
+
+        case = unit_cases["segment_bold_inline_code"]
+        assert _parse_segment(case["input"]) == case["expected"]
+
+    def test_parse_paragraph_h1_h2_h3(self, unit_cases):
+        from notebooklm_tools.core.sources import _parse_paragraph
+
+        for key in ("paragraph_h1", "paragraph_h2", "paragraph_h3"):
+            case = unit_cases[key]
+            assert _parse_paragraph(case["input"]) == case["expected"], f"failed: {key}"
+
+    def test_parse_paragraph_bullet_depth_0_1_2(self, unit_cases):
+        from notebooklm_tools.core.sources import _parse_paragraph
+
+        for key in (
+            "paragraph_bullet_depth_0",
+            "paragraph_bullet_depth_1",
+            "paragraph_bullet_depth_2",
+        ):
+            case = unit_cases[key]
+            assert _parse_paragraph(case["input"]) == case["expected"], f"failed: {key}"
+
+    def test_parse_paragraph_numbered_bullet(self, unit_cases):
+        from notebooklm_tools.core.sources import _parse_paragraph
+
+        case = unit_cases["paragraph_numbered_bullet"]
+        assert _parse_paragraph(case["input"]) == case["expected"]
+
+    def test_parse_paragraph_unknown_flag_fallback(self, unit_cases, caplog):
+        """Unknown paragraph flag (99) → plain text + logger.warning."""
+        import logging
+
+        from notebooklm_tools.core.sources import _parse_paragraph
+
+        case = unit_cases["paragraph_unknown_flag_fallback"]
+        with caplog.at_level(logging.WARNING, logger="notebooklm_tools.core.sources"):
+            result = _parse_paragraph(case["input"])
+        assert result == case["expected"]
+        assert any(
+            "unknown" in r.message.lower() or "99" in str(r.message)
+            for r in caplog.records
+        ), f"expected warning about unknown flag, got: {[r.message for r in caplog.records]}"
+
+    def test_parse_table_basic(self, unit_cases):
+        from notebooklm_tools.core.sources import _parse_table
+
+        case = unit_cases["table_basic_2x2"]
+        # block = [start, end, null, null, [cols, rows, cells]]
+        table_data = case["input"][4]
+        assert _parse_table(table_data) == case["expected"]
+
+    def test_render_2kb_fixture_full(self, fixture_data):
+        """Integration: 7 content blocks → full markdown matches anchor."""
+        from notebooklm_tools.core.sources import _render_markdown_from_blocks
+
+        blocks = fixture_data["integration_content_blocks"]
+        expected = fixture_data["integration_expected_markdown"]
+        assert _render_markdown_from_blocks(blocks) == expected

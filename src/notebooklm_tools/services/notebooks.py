@@ -487,12 +487,16 @@ def clone_notebook(
                     content = notes_by_id[src_id].get("content") or ""
                     consumed_note_ids.add(src_id)
                 else:
-                    # Source-area text/markdown: fetch via default Source RPC
+                    # Source-area text/markdown: fetch via default Source RPC.
+                    # raw_markdown=True preserves heading/bullet/format metadata
+                    # so the cloned note keeps original markdown fidelity.
                     content = ""
                     if src_id:
                         try:
                             fetched = client.get_source_fulltext(
-                                src_id, notebook_id=source_notebook_id
+                                src_id,
+                                notebook_id=source_notebook_id,
+                                raw_markdown=True,
                             )
                             if isinstance(fetched, dict):
                                 content = fetched.get("content") or ""
@@ -700,8 +704,12 @@ def _clone_one_source(
         return {"status": "cloned", "source_id": result["id"], "title": result.get("title", title)}
 
     if type_name == "pasted_text":
+        # raw_markdown=True preserves heading/bullet/format metadata so the
+        # cloned source keeps original markdown fidelity.
         fulltext = client.get_source_fulltext(
-            source["id"], notebook_id=source_notebook_id
+            source["id"],
+            notebook_id=source_notebook_id,
+            raw_markdown=True,
         )
         content = (fulltext or {}).get("content", "") if isinstance(fulltext, dict) else ""
         if not content:
