@@ -542,8 +542,19 @@ class StudioMixin(BaseClient):
                         timestamp = mm_entry[1][2][2]
                     break
 
-        # 2. Step 1: UUID-based deletion (AH0mwd)
-        params_v2 = [notebook_id, None, [mind_map_id], [2]]
+        # 2. Step 1: UUID-based deletion (v5: V5N4be = RPC_DELETE_STUDIO)
+        # NLM 웹 baseline (260512 캡쳐): 2-slot [옵션_nested, mind_map_uuid].
+        # notebook_id는 path로만 전달; params에서 제거.
+        params_v2 = [
+            [
+                2,
+                None,
+                None,
+                [1, None, None, None, None, None, None, None, None, None, None, [1]],
+                [[1, 4, 2, 3, 6]],
+            ],
+            mind_map_id,
+        ]
         self._call_rpc(self.RPC_DELETE_MIND_MAP, params_v2, f"/notebook/{notebook_id}")
 
         # 3. Step 2: Timestamp-based sync/deletion (cFji9)
@@ -1144,38 +1155,65 @@ class StudioMixin(BaseClient):
                 f"No sources found in notebook {notebook_id}. Add sources before creating studio content."
             )
 
-        # Build source IDs in the nested format: [[[id1]], [[id2]], ...]
-        sources_nested = [[[sid]] for sid in source_ids]
-
+        # NLM 웹 baseline (260512 라이브 캡쳐, R7cb6c = RPC_CREATE_STUDIO):
+        # [
+        #   [2, null, null, [1, null×10, [1]], [[1,4,2,3,6]]],  ← slot1: v4 nested + mind-map 옵션
+        #   notebook_id,                                         ← slot2
+        #   [null, null, 4, [[[sid1], [sid2], ...]]],           ← slot3: sources 묶음
+        #   null, null, null, null, null,                        ← slots 4-8
+        #   [null, [4]],                                         ← slot9: 옵션
+        # ]
+        sources_grouped = [[sid] for sid in source_ids]
         params = [
-            sources_nested,
+            [
+                2,
+                None,
+                None,
+                [1, None, None, None, None, None, None, None, None, None, None, [1]],
+                [[1, 4, 2, 3, 6]],
+            ],
+            notebook_id,
+            [None, None, 4, [sources_grouped]],
             None,
             None,
             None,
             None,
-            ["interactive_mindmap", [["[CONTEXT]", ""]], ""],
             None,
-            [2, None, [1]],
+            [None, [4]],
         ]
 
         result = self._call_rpc(self.RPC_GENERATE_MIND_MAP, params)
 
-        if result and isinstance(result, list) and len(result) > 0:
-            # Response is nested: [[json_string, null, [gen_ids]]]
-            # So result[0] is [json_string, null, [gen_ids]]
-            inner = result[0] if isinstance(result[0], list) else result
+        # Phase 4-A NLM 사후 검증 권고: 9-slot 호출 → 응답 트리도 변경됐을 가능성 →
+        # 기존 인덱스 접근이 IndexError·TypeError 위험 → try-except graceful degradation.
+        try:
+            if result and isinstance(result, list) and len(result) > 0:
+                # Response is nested: [[json_string, null, [gen_ids]]]
+                # So result[0] is [json_string, null, [gen_ids]]
+                inner = result[0] if isinstance(result[0], list) else result
 
-            mind_map_json = inner[0] if isinstance(inner[0], str) else None
-            generation_info = inner[2] if len(inner) > 2 else None
+                mind_map_json = inner[0] if isinstance(inner[0], str) else None
+                generation_info = inner[2] if len(inner) > 2 else None
 
-            generation_id = None
-            if isinstance(generation_info, list) and len(generation_info) > 0:
-                generation_id = generation_info[0]
+                generation_id = None
+                if isinstance(generation_info, list) and len(generation_info) > 0:
+                    generation_id = generation_info[0]
 
+                return {
+                    "mind_map_json": mind_map_json,
+                    "generation_id": generation_id,
+                    "source_ids": source_ids,
+                }
+        except (IndexError, TypeError, KeyError) as e:
+            logger.debug(
+                f"generate_mind_map response parse failed ({type(e).__name__}: {e}); "
+                f"raw result truncated: {str(result)[:200]!r}"
+            )
             return {
-                "mind_map_json": mind_map_json,
-                "generation_id": generation_id,
+                "mind_map_json": None,
+                "generation_id": None,
                 "source_ids": source_ids,
+                "_raw": result,
             }
 
         return None
@@ -1187,54 +1225,31 @@ class StudioMixin(BaseClient):
         source_ids: list[str] | None = None,
         title: str = "Mind Map",
     ) -> dict[str, Any] | None:
-        """Save a generated Mind Map to a notebook.
+        """[DEPRECATED 260512] NLM auto-saves mind maps on generation.
 
-        This is step 2 of 2 for creating a mind map. First use
-        generate_mind_map() to create the JSON structure.
+        NLM 새 UI는 ``generate_mind_map()`` 호출 시 자동 저장하므로 별도 save 단계가
+        사라졌다. 호환성을 위해 함수 시그니처를 유지하되 no-op로 동작한다.
 
-        Args:
-            notebook_id: The notebook UUID
-            mind_map_json: The JSON string from generate_mind_map()
-            source_ids: List of source UUIDs used to generate the map (defaults to all sources)
-            title: Display title for the mind map
-
-        Returns:
-            Dict with mind_map_id and saved info, or None on failure
+        ``generate_mind_map()`` 단독 호출만으로 마인드맵이 저장된다.
         """
-        # Default to all sources if not specified
-        if source_ids is None:
-            source_ids = self._get_all_source_ids(notebook_id)
+        import warnings
 
-        if not source_ids:
-            raise ValueError(
-                f"No sources found in notebook {notebook_id}. Add sources before creating studio content."
-            )
-
-        # Build source IDs in the simpler format: [[id1], [id2], ...]
-        sources_simple = [[sid] for sid in source_ids]
-
-        metadata = [2, None, None, 5, sources_simple]
-
-        params = [notebook_id, mind_map_json, metadata, None, title]
-
-        result = self._call_rpc(self.RPC_SAVE_MIND_MAP, params, f"/notebook/{notebook_id}")
-
-        if result and isinstance(result, list) and len(result) > 0:
-            # Response is nested: [[mind_map_id, json, metadata, null, title]]
-            inner = result[0] if isinstance(result[0], list) else result
-
-            mind_map_id = inner[0] if len(inner) > 0 else None
-            saved_json = inner[1] if len(inner) > 1 else None
-            saved_title = inner[4] if len(inner) > 4 else title
-
-            return {
-                "mind_map_id": mind_map_id,
-                "notebook_id": notebook_id,
-                "title": saved_title,
-                "mind_map_json": saved_json,
-            }
-
-        return None
+        warnings.warn(
+            "save_mind_map is deprecated as of 260512. "
+            "NLM auto-saves mind maps on generation. "
+            "Use generate_mind_map() alone; its response now contains the saved mind_map_id.",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        # Phase 4-A NLM 사후 검증 권고: None 대신 빈 딕셔너리 폴백.
+        # 호출자가 res["mind_map_id"] 직접 접근 시 TypeError 방지.
+        return {
+            "status": "deprecated",
+            "notebook_id": notebook_id,
+            "mind_map_id": None,
+            "title": title,
+            "mind_map_json": None,
+        }
 
     def list_mind_maps(self, notebook_id: str) -> list[dict[str, Any]]:
         """List all Mind Maps in a notebook."""

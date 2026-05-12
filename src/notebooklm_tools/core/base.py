@@ -128,10 +128,12 @@ class BaseClient:
     RPC_REVISE_SLIDE_DECK = "KmcKPe"  # Revise existing slide deck with per-slide instructions
 
     # Mind map RPCs
-    RPC_GENERATE_MIND_MAP = "yyryJe"  # Generate mind map JSON from sources
-    RPC_SAVE_MIND_MAP = "CYK0Xb"  # Save generated mind map to notebook
-    RPC_LIST_MIND_MAPS = "cFji9"  # List existing mind maps
-    RPC_DELETE_MIND_MAP = "AH0mwd"  # Delete a mind map
+    # v5 도메인 통합 발견 (260512 라이브 캡쳐): Mind Map ⊂ Studio.
+    # NLM 웹이 generate/delete를 generic studio RPC로 통합 처리.
+    RPC_GENERATE_MIND_MAP = "R7cb6c"  # (v5) Studio create — mind map ⊂ studio
+    RPC_SAVE_MIND_MAP = "CYK0Xb"  # DEPRECATED 260512: NLM auto-saves on generation
+    RPC_LIST_MIND_MAPS = "cFji9"  # List existing mind maps (검증 통과, 변경 없음)
+    RPC_DELETE_MIND_MAP = "V5N4be"  # (v5) Studio delete — mind map ⊂ studio
 
     # Notes RPCs (share RPC IDs with mind maps, differ by parameters)
     RPC_CREATE_NOTE = "CYK0Xb"  # Create note from content (same as SAVE_MIND_MAP)

@@ -102,11 +102,16 @@ class SharingMixin(BaseClient):
         Returns:
             The public URL if enabled, None if disabled
         """
-        # Payload: [[[notebook_id, null, [access_level], [notify, ""]]], 1, null, [2]]
-        # access_level: 0 = restricted, 1 = public
+        # NLM 웹 baseline (260512 캡쳐): slot4 v4 nested + slot1 내 [access_code, 0] 페어
+        # [[[id, null, [1, 0], [0, ""]]], 1, null, [2, null, null, [1, null×10, [1]]]]
         access_code = self.SHARE_ACCESS_PUBLIC if is_public else self.SHARE_ACCESS_RESTRICTED
 
-        params = [[[notebook_id, None, [access_code], [0, ""]]], 1, None, [2]]
+        params = [
+            [[notebook_id, None, [access_code, 0], [0, ""]]],
+            1,
+            None,
+            [2, None, None, [1, None, None, None, None, None, None, None, None, None, None, [1]]],
+        ]
 
         self._call_rpc(self.RPC_SHARE_NOTEBOOK, params)
 
@@ -139,14 +144,15 @@ class SharingMixin(BaseClient):
         if role_code == constants.SHARE_ROLE_OWNER:
             raise ValueError("Cannot add collaborator as owner")
 
-        # Payload: [[[notebook_id, [[email, null, role_code]], null, [notify_flag, message]]], 1, null, [2]]
+        # NLM 웹 baseline (260512 캡쳐): slot4 v4 nested + slot1 내 [0, 0] 추가 element
+        # [[[id, [[email, null, role_code]], [0, 0], [notify_flag, message]]], 1, null, [2, null, null, [1, null×10, [1]]]]
         notify_flag = 0 if notify else 1  # 0 = notify, 1 = don't notify
 
         params = [
-            [[notebook_id, [[email, None, role_code]], None, [notify_flag, message]]],
+            [[notebook_id, [[email, None, role_code]], [0, 0], [notify_flag, message]]],
             1,
             None,
-            [2],
+            [2, None, None, [1, None, None, None, None, None, None, None, None, None, None, [1]]],
         ]
 
         result = self._call_rpc(self.RPC_SHARE_NOTEBOOK, params)
@@ -191,7 +197,13 @@ class SharingMixin(BaseClient):
 
         notify_flag = 0 if notify else 1  # 0 = notify, 1 = don't notify
 
-        params = [[[notebook_id, email_items, None, [notify_flag, message]]], 1, None, [2]]
+        # NLM 웹 baseline (260512 캡쳐): add_collaborator와 동일 패턴 (slot4 nested + slot1 [0,0])
+        params = [
+            [[notebook_id, email_items, [0, 0], [notify_flag, message]]],
+            1,
+            None,
+            [2, None, None, [1, None, None, None, None, None, None, None, None, None, None, [1]]],
+        ]
 
         result = self._call_rpc(self.RPC_SHARE_NOTEBOOK, params)
 

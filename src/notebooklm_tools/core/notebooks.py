@@ -36,8 +36,14 @@ class NotebookMixin(BaseClient):
 
     def list_notebooks(self, debug: bool = False) -> list[Notebook]:
         """List all notebooks."""
-        # [null, 1, null, [2]] - params for list notebooks
-        params = [None, 1, None, [2]]
+        # NLM 웹 baseline (260512 캡쳐): slot4 v4 nested + sentinel [1]
+        # [null, 1, null, [2, null, null, [1, null×10, [1]]]]
+        params = [
+            None,
+            1,
+            None,
+            [2, None, None, [1, None, None, None, None, None, None, None, None, None, None, [1]]],
+        ]
 
         result = self._call_rpc(self.RPC_LIST_NOTEBOOKS, params)
 
@@ -127,9 +133,11 @@ class NotebookMixin(BaseClient):
 
     def get_notebook(self, notebook_id: str) -> dict | None:
         """Get notebook details."""
+        # NLM 웹 baseline (260512 캡쳐): 3-slot, slot3 nested 7-elem
+        # [id, null, [2, null, null, null, null, null, [1]]]
         return self._call_rpc(
             self.RPC_GET_NOTEBOOK,
-            [notebook_id, None, [2], None, 0],
+            [notebook_id, None, [2, None, None, None, None, None, [1]]],
             f"/notebook/{notebook_id}",
         )
 
@@ -167,12 +175,13 @@ class NotebookMixin(BaseClient):
 
     def create_notebook(self, title: str = "") -> Notebook | None:
         """Create a new notebook."""
+        # NLM 웹 baseline (260512 캡쳐): 4-slot, slot4 nested
+        # [title, null, null, [2, null, null, [1, null×10, [1]]]]
         params = [
             title,
             None,
             None,
-            [2],
-            [1, None, None, None, None, None, None, None, None, None, [1]],
+            [2, None, None, [1, None, None, None, None, None, None, None, None, None, None, [1]]],
         ]
         result = self._call_rpc(self.RPC_CREATE_NOTEBOOK, params)
         if result and isinstance(result, list) and len(result) >= 3:

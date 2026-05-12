@@ -28,8 +28,10 @@ def refresh_auth() -> ResultDict:
 
         # When Google RTS (10-min rotating token) has expired, disk reload alone
         # returns stale cookies and falsely reports success. Headless re-auth is
-        # the only path that can actually recover. Try it first.
+        # the only path that can actually recover. Try it first, then fail-close
+        # if headless also fails (no stale-fallback to disk cache).
         if _is_rts_expiring():
+            headless_failure: str | None = None
             try:
                 from notebooklm_tools.utils.cdp import run_headless_auth
 
@@ -42,12 +44,33 @@ def refresh_auth() -> ResultDict:
                         "status": "success",
                         "message": "RTS rotated. Auth refreshed via headless Chrome.",
                     }
+                headless_failure = "headless auth returned no tokens"
             except Exception as e:
-                mcp_logger.debug(f"Headless auth on RTS rotation failed: {e}")
+                headless_failure = f"{type(e).__name__}: {e}"
+                mcp_logger.warning(
+                    f"Headless auth on RTS rotation failed: {headless_failure}"
+                )
 
-        # RTS healthy (or headless unavailable): try disk reload
+            # Fail-close: do NOT fall through to stale disk reload when RTS has
+            # rotated. Returning a false "success" with expired tokens misleads
+            # callers into believing auth is recovered.
+            return {
+                "status": "error",
+                "error": (
+                    "RTS token expired and headless auth failed. "
+                    "Run '! nlm login' manually."
+                ),
+                "hint": (
+                    "Foreground `nlm login` (5-10s) is the reliable recovery path. "
+                    f"Headless failure: {headless_failure}"
+                ),
+            }
+
+        # RTS healthy: disk reload is meaningful. Guard with _is_rts_expiring()
+        # to defend against TOCTOU races where rotation occurs between the
+        # initial check and load_cached_tokens().
         cached = load_cached_tokens()
-        if cached:
+        if cached and cached.cookies and not _is_rts_expiring():
             reset_client()
             get_client()
             return {
@@ -55,7 +78,7 @@ def refresh_auth() -> ResultDict:
                 "message": "Auth tokens reloaded from disk cache.",
             }
 
-        # No cache: try headless auth if Chrome profile exists
+        # No cache (or RTS rotated mid-call): try headless auth if Chrome profile exists
         try:
             from notebooklm_tools.utils.cdp import run_headless_auth
 
@@ -67,12 +90,12 @@ def refresh_auth() -> ResultDict:
                     "status": "success",
                     "message": "Auth tokens refreshed via headless Chrome.",
                 }
-        except Exception:
-            pass
+        except Exception as e:
+            mcp_logger.warning(f"Headless auth (no-cache path) failed: {e}")
 
         return {
             "status": "error",
-            "error": "No cached tokens found. Run 'nlm login' to authenticate.",
+            "error": "No valid cached tokens. Run '! nlm login' to authenticate.",
         }
     except Exception as e:
         return error_result(str(e))

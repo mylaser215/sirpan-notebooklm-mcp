@@ -60,7 +60,14 @@ class ResearchMixin(BaseClient):
 
         if mode_lower == "fast":
             # Fast Research: Ljjv0c
-            params = [[query, source_type], None, 1, notebook_id]
+            # NLM 웹 baseline (260512 캡쳐): slot2 v4 nested
+            # [[query, 1], [2, null, null, [1, null×10, [1]]], 1, notebook_id]
+            params = [
+                [query, source_type],
+                [2, None, None, [1, None, None, None, None, None, None, None, None, None, None, [1]]],
+                1,
+                notebook_id,
+            ]
             rpc_id = self.RPC_START_FAST_RESEARCH
         else:
             # Deep Research: QA9ei
