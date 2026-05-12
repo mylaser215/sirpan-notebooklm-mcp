@@ -12,6 +12,7 @@
   - `notebook_clone(notebook_id, new_title, exclude_types=None)` ✅ markdown 무결성 보존 (raw_markdown=True 라우팅). 가드 코드 제거 완료
 - **`get_source_fulltext`** parser 재작성 완료 — `raw_markdown: bool = False` 기본값 + 6개 모듈 헬퍼(_parse_segment/_parse_paragraph/_parse_table/_parse_content_block/_render_markdown_from_blocks/_unwrap_content_blocks). Graceful Degradation (`dict.get`/try-except + `mcp_logger.warning`)
 - 글로벌 CLAUDE.md NLM동기화 절: 본 흐름 복원 (source_replace_file 단일 라우팅)
+- **두 도구 사용 매트릭스**: [[NotebookLM MCP 도구 사용 매트릭스]] (백업/실험=clone, 매일 동기화=replace_file. 매트릭스·한계·CLI 예시·비유 박제)
 - fixture: `tests/fixtures/source_fulltext_2kb.json` (7 blocks + 14 unit cases) + `source_fulltext_36kb_full.json` (155 blocks, 9436 chars markdown)
 - 33KB 회귀 실측: 47 H1/46 H2/28 H3/104 bullets, parser crash 0
 
