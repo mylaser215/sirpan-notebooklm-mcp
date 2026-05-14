@@ -144,6 +144,8 @@ class BaseClient:
     # Sharing RPCs
     RPC_SHARE_NOTEBOOK = "QDyure"  # Set sharing settings (visibility, collaborators)
     RPC_GET_SHARE_STATUS = "JFMDGd"  # Get current share status
+    # AUrzMb — NLM share dialog email autocomplete Suggest API (NLM 자문 ●●●, 260514).
+    # ROI low — SDK 미구현, 매핑만 박제 (향후 share invite UX 작업 시 참조).
 
     # Export RPCs
     RPC_EXPORT_ARTIFACT = "Krh3pd"  # Export to Google Docs/Sheets

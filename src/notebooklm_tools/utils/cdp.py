@@ -67,11 +67,20 @@ __all__ = [
 
 CDP_DEFAULT_PORT = 9222
 CDP_PORT_RANGE = range(9222, 9232)  # Ports to scan for existing/available
+# 헤드리스 백그라운드 ThreadPoolExecutor에서 CDP endpoint 노출 지연 →
+# 포그라운드 extract_cookies_via_cdp(tries=30, line 923)와 통일.
+# 비대칭(5 vs 30)이 background race silent fail 결정 원인 (260514 NLM 자문 ●●●).
+CDP_HEADLESS_TRIES = 30
 NOTEBOOKLM_URL = f"{get_base_url()}/"
 
 import logging as _logging  # noqa: E402
 
 _logger = _logging.getLogger(__name__)
+# 백그라운드 ThreadPoolExecutor silent fail 가시화 — propagate=True 명시 +
+# basicConfig 미호출 환경에서 "No handlers" 경고 억제 (NullHandler fallback).
+_logger.propagate = True
+if not _logger.handlers:
+    _logger.addHandler(_logging.NullHandler())
 
 
 def _cdp_http_base(port: int) -> str:
@@ -1151,7 +1160,8 @@ def run_headless_auth(
                 return None
 
             # Wait for Chrome debugger to be ready
-            debugger_url = get_debugger_url(port, tries=5)
+            # tries=CDP_HEADLESS_TRIES (30) — background ThreadPoolExecutor race 방어
+            debugger_url = get_debugger_url(port, tries=CDP_HEADLESS_TRIES)
             if not debugger_url:
                 return None
 
