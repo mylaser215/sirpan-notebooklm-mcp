@@ -88,7 +88,7 @@ def source_add(
     except ValidationError as e:
         return error_result(_normalize_source_validation_error(str(e)))
     except ServiceError as e:
-        return error_result(e.user_message, hint=e.hint)
+        return error_result(e.user_message, hint=e.hint, detail=str(e))
     except Exception as e:
         return error_result(str(e))
 
@@ -107,7 +107,7 @@ def source_list_drive(notebook_id: str) -> ResultDict:
         result = sources_service.list_drive_sources(client, notebook_id)
         return {"status": "success", "notebook_id": notebook_id, **result}
     except ServiceError as e:
-        return error_result(e.user_message, hint=e.hint)
+        return error_result(e.user_message, hint=e.hint, detail=str(e))
     except Exception as e:
         return error_result(str(e))
 
@@ -143,7 +143,7 @@ def source_sync_drive(source_ids: list[str], confirm: bool = False) -> ResultDic
             "results": sync_results,
         }
     except ServiceError as e:
-        return error_result(e.user_message, hint=e.hint)
+        return error_result(e.user_message, hint=e.hint, detail=str(e))
     except Exception as e:
         return error_result(str(e))
 
@@ -166,7 +166,7 @@ def source_rename(notebook_id: str, source_id: str, new_title: str) -> ResultDic
         result = sources_service.rename_source(client, notebook_id, source_id, new_title)
         return {"status": "success", **result}
     except ServiceError as e:
-        return error_result(e.user_message, hint=e.hint)
+        return error_result(e.user_message, hint=e.hint, detail=str(e))
     except Exception as e:
         return error_result(str(e))
 
@@ -224,7 +224,7 @@ def source_delete(
             "message": f"Source {source_id} has been permanently deleted.",
         }
     except ServiceError as e:
-        return error_result(e.user_message, hint=e.hint)
+        return error_result(e.user_message, hint=e.hint, detail=str(e))
     except Exception as e:
         return error_result(str(e))
 
@@ -282,7 +282,7 @@ def source_replace_file(
     except ValidationError as e:
         return error_result(str(e), hint=e.hint)
     except ServiceError as e:
-        return error_result(e.user_message, hint=e.hint)
+        return error_result(e.user_message, hint=e.hint, detail=str(e))
     except Exception as e:
         return error_result(str(e))
 
@@ -307,7 +307,7 @@ def source_describe(source_id: str, notebook_id: str | None = None) -> ResultDic
         result = sources_service.describe_source(client, source_id, notebook_id=notebook_id)
         return {"status": "success", **result}
     except ServiceError as e:
-        return error_result(e.user_message, hint=e.hint)
+        return error_result(e.user_message, hint=e.hint, detail=str(e))
     except Exception as e:
         return error_result(str(e))
 
@@ -334,6 +334,6 @@ def source_get_content(source_id: str, notebook_id: str | None = None) -> Result
         result = sources_service.get_source_content(client, source_id, notebook_id=notebook_id)
         return {"status": "success", **result}
     except ServiceError as e:
-        return error_result(e.user_message, hint=e.hint)
+        return error_result(e.user_message, hint=e.hint, detail=str(e))
     except Exception as e:
         return error_result(str(e))
