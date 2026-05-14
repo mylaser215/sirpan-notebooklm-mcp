@@ -21,6 +21,15 @@ notebooklm-mcp --transport http --port 9472 # HTTP 모드
 uv run pytest                               # 테스트
 ```
 
+### uv 캐시 결함 우회 (재설치 후 코드 갱신 실패 시)
+위 `uv cache clean && uv tool install --force` 후에도 `~/AppData/Roaming/uv/tools/notebooklm-mcp-cli/Lib/site-packages/`의 코드가 *옛 버전*인 경우 (v4 ATOM-4 발견 + 세션36 재현 입증). `--force`가 metadata만 갱신하고 file copy를 skip하는 케이스로 추정:
+```bash
+python ~/bin/mcp_launcher.py stop notebooklm
+rm -rf ~/AppData/Roaming/uv/tools/notebooklm-mcp-cli
+uv tool install --no-cache --force .       # --no-cache 명시 필수
+python ~/bin/mcp_launcher.py start notebooklm
+```
+
 ## 인증
 - 쿠키 기반: Chrome DevTools에서 Cookie 헤더 추출 → `save_auth_tokens(cookies=...)` 또는 `nlm login`
 - 만료 시: Chrome DevTools에서 새 쿠키 재추출

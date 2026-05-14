@@ -50,11 +50,14 @@ SUMMARY_BLOCK_RE = re.compile(
 # helpers. `re.MULTILINE` makes `^` match the start of each line.
 SYMBOL_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
     ("function", re.compile(r"^(?:export\s+(?:default\s+)?)?(?:async\s+)?function\s+(\w+)\s*[<(]", re.MULTILINE)),
-    ("arrow", re.compile(r"^(?:export\s+(?:default\s+)?)?(?:const|let|var)\s+(\w+)\s*(?::[^=\n]+)?=\s*(?:async\s+)?(?:\([^)]*\)|\w+)\s*(?::[^=\n]+)?\s*=>", re.MULTILINE)),
+    # arrow: variable type annotation may span lines (e.g. `: Record<\n  string,\n  T\n>`);
+    # RHS may start with a generic param list (e.g. `= <T>(arg: T) =>`).
+    ("arrow", re.compile(r"^(?:export\s+(?:default\s+)?)?(?:const|let|var)\s+(\w+)\s*(?::[^=]+?)?=\s*(?:async\s+)?(?:<[^>]*>\s*)?(?:\([^)]*\)|\w+)\s*(?::[^=\n]+)?\s*=>", re.MULTILINE)),
     ("class", re.compile(r"^(?:export\s+(?:default\s+)?)?(?:abstract\s+)?class\s+(\w+)", re.MULTILINE)),
     ("interface", re.compile(r"^(?:export\s+)?interface\s+(\w+)", re.MULTILINE)),
     ("type", re.compile(r"^(?:export\s+)?type\s+(\w+)\s*[<=]", re.MULTILINE)),
-    ("enum", re.compile(r"^(?:export\s+)?(?:const\s+)?enum\s+(\w+)", re.MULTILINE)),
+    # `declare` enum is an ambient declaration (no runtime emit).
+    ("enum", re.compile(r"^(?:export\s+)?(?:declare\s+)?(?:const\s+)?enum\s+(\w+)", re.MULTILINE)),
 ]
 
 
