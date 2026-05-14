@@ -113,8 +113,6 @@ def detect_id_type(value: str, profile: str | None = None) -> str:
     """
     from notebooklm_tools.cli.utils import get_client
     from notebooklm_tools.core.exceptions import NLMError
-    from notebooklm_tools.services.errors import ServiceError
-    from notebooklm_tools.services.sources import get_source_content
 
     try:
         with get_client(profile) as client:
@@ -126,14 +124,15 @@ def detect_id_type(value: str, profile: str | None = None) -> str:
             except NLMError:
                 pass
 
-            # Try as source ID
+            # Try as source ID — call get_source_fulltext directly to avoid
+            # the get_source_content resolver chain, which TypeErrors on
+            # minimal source-only client stubs that don't implement the
+            # full keyword signature.
             try:
-                # Reuse the supported source-content path instead of calling a
-                # non-existent legacy client method.
-                content = get_source_content(client, value)
-                if content:
+                fulltext = client.get_source_fulltext(value)
+                if fulltext:
                     return "source"
-            except (NLMError, ServiceError, AttributeError):
+            except Exception:
                 pass
 
     except NLMError:

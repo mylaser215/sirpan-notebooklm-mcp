@@ -9,6 +9,7 @@ These tests verify that:
    across macOS, Linux, and Windows candidate tables
 """
 
+import platform
 from pathlib import Path
 from unittest.mock import patch
 
@@ -306,6 +307,10 @@ class TestCDPStartupHandling:
             result = get_chrome_path()
         assert result is None
 
+    @pytest.mark.skipif(
+        platform.system() == "Windows",
+        reason="Path.exists mocking compares POSIX strings; WindowsPath str() uses backslashes — fake_exists never matches",
+    )
     def test_get_chrome_path_macos_fallback_to_chrome(self):
         """On macOS, if only the original Chrome path exists it is still returned."""
         from notebooklm_tools.utils.cdp import get_chrome_path
