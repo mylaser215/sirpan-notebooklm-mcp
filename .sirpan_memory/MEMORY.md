@@ -4,7 +4,7 @@
 - 세션아카이브: `000-시스템/070-세션로그/notebooklm-mcp_세션아카이브.md`
 - 타임라인: `000-시스템/070-세션로그/notebooklm-mcp_작업타임라인.md`
 
-## 현재 상태 (260514-세션37·v6 졸업·source_add 진단 종결)
+## 현재 상태 (260515-세션42·묶음C 이단시공·`session_save.py` timeline_row 픽스 D안)
 - **NotebookLM MCP v0.5.23+** — Python/uv/FastMCP, 포트 9472
 - GitHub: mylaser215/sirpan-notebooklm-mcp (fork from jacob-bd/notebooklm-mcp-cli)
 - ✅ **v6 졸업** (세션36 26-05-13): NLM동기화 정책 대전환 단기3+중기3+장기4 = 10건 완료. 86→85 sources / 6건 정정안 적용 / JIT 14건 후속 식별 (별 세션) / Drift 5건 보존. `generate_py_md.py` + `fallback_to_text` 옵션 + 매트릭스 정정(꼬리 `.md` = 가공 SSOT) 박제. Developer-centric Bias 회고
@@ -29,6 +29,7 @@
 - `260512-173000`: `uv tool install --force` 캐시 결함 (우회 4-step 박제 — venv rm + `--no-cache --force`)
 
 ## 최근 세션
+- 세션42 (260515): 묶음C 이단시공 — `session_save.py:1804` *timeline_row* `세션N` 자동 치환 부작용 픽스 (D안: `_validate_timeline_row` ATOM-A 확장 + 라인 1803-1804 제거). 4 케이스 dry-run OK, +12/-5 라인. 모 plan `260514-210415` 묶음C `[x]`
 - 세션37 (260514): source_add state-level 진단 + 16:21 후속 B-축소 실측으로 Source-Note 라우팅 별 결함 아님 확정 (v3 §10 픽스 커버). `detail` 필드 8 wrappers 보강 (commit `67a3eb7`)
 - 세션36 (260513): v6 장기 4/4 완료 — notebook_clone 신뢰성 검증 (86 sources 6분42초) + ROI 분류 + 1건 정리 + 매트릭스 정정 (꼬리 `.md`=가공 SSOT 회귀). Developer-centric Bias 회고 박제
 - 세션35 (260513): v6 단기 3/3 + 중기 3/3 — `generate_py_md.py` 도구화 + `fallback_to_text` 옵션 + 매트릭스 박제. NLM 자문 conv `803fdca1` Q1~Q4 결정
