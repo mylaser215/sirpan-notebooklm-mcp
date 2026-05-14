@@ -1140,6 +1140,12 @@ def run_headless_auth(
             chrome_was_running = True
         else:
             # No Chrome running - launch in headless mode
+            if is_profile_locked(profile_name):
+                _logger.info(
+                    "run_headless_auth: profile %r locked by another Chrome instance; aborting headless launch",
+                    profile_name,
+                )
+                return None
             chrome_process = launch_chrome_process(port, headless=True, profile_name=profile_name)
             if not chrome_process:
                 return None
@@ -1190,7 +1196,13 @@ def run_headless_auth(
 
         return tokens
 
-    except Exception:
+    except Exception as e:
+        _logger.warning(
+            "run_headless_auth silent failure: %s: %s",
+            type(e).__name__,
+            e,
+            exc_info=True,
+        )
         return None
 
     finally:
