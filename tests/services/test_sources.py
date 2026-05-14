@@ -734,3 +734,90 @@ class TestReplaceSourceFile:
 
         # delete was called exactly once before the add_text failure
         assert mock_client.delete_source.call_count == 1
+
+    # ──────────────────────────────────────────────────────────────────────
+    # ATOM-1 (260515): atomic 옵션 (ADD-first → 분실 차단, opt-in trial)
+    # ──────────────────────────────────────────────────────────────────────
+
+    def test_atomic_uses_add_first_order(self, mock_client, tmp_path):
+        """atomic=True → call_order == ['add', 'delete'] (반전 검증)."""
+        file_path = tmp_path / "doc.txt"
+        file_path.write_text("content")
+
+        mock_client.get_notebook_sources_with_types.return_value = []
+
+        call_order = []
+        mock_client.add_file.side_effect = lambda *a, **kw: (
+            call_order.append("add") or {"id": "src-new", "title": "doc.txt"}
+        )
+        mock_client.delete_source.side_effect = lambda *a, **kw: (
+            call_order.append("delete") or True
+        )
+
+        result = replace_source_file(
+            mock_client, "nb-1", "src-old", str(file_path), atomic=True
+        )
+
+        assert call_order == ["add", "delete"]
+        assert result["new_source_id"] == "src-new"
+        assert "atomic" in result["message"]
+
+    def test_atomic_add_failure_preserves_original(self, mock_client, tmp_path):
+        """atomic=True + add 실패 → delete 호출 X + 옛 source 보존."""
+        file_path = tmp_path / "doc.txt"
+        file_path.write_text("content")
+
+        mock_client.get_notebook_sources_with_types.return_value = []
+        mock_client.add_file.side_effect = RuntimeError("upload network error")
+
+        with pytest.raises(
+            ServiceError, match="atomic.*add failed.*original source preserved"
+        ):
+            replace_source_file(
+                mock_client, "nb-1", "src-old", str(file_path), atomic=True
+            )
+
+        # Load-bearing: delete must NEVER fire when atomic add fails
+        mock_client.delete_source.assert_not_called()
+
+    def test_atomic_default_is_legacy_delete_first(self, mock_client, tmp_path):
+        """atomic 미지정 → 기존 delete-first 흐름 유지 (회귀 가드)."""
+        file_path = tmp_path / "doc.txt"
+        file_path.write_text("content")
+
+        mock_client.get_notebook_sources_with_types.return_value = []
+
+        call_order = []
+        mock_client.delete_source.side_effect = lambda *a, **kw: (
+            call_order.append("delete") or True
+        )
+        mock_client.add_file.side_effect = lambda *a, **kw: (
+            call_order.append("add") or {"id": "src-new", "title": "doc.txt"}
+        )
+
+        result = replace_source_file(mock_client, "nb-1", "src-old", str(file_path))
+
+        # Legacy ordering preserved
+        assert call_order == ["delete", "add"]
+        assert "atomic" not in result["message"]
+
+    def test_atomic_add_success_delete_failure_surfaces(self, mock_client, tmp_path):
+        """atomic=True + add 성공 + delete 실패 → 새 source 살아있음 + ServiceError."""
+        file_path = tmp_path / "doc.txt"
+        file_path.write_text("content")
+
+        mock_client.get_notebook_sources_with_types.return_value = []
+        mock_client.add_file.return_value = {"id": "src-new", "title": "doc.txt"}
+        mock_client.delete_source.side_effect = RuntimeError("delete network error")
+
+        with pytest.raises(
+            ServiceError, match="atomic.*add succeeded but delete failed"
+        ):
+            replace_source_file(
+                mock_client, "nb-1", "src-old", str(file_path), atomic=True
+            )
+
+        # add was called once; delete was attempted (failed) — both sources
+        # transiently present in the notebook
+        mock_client.add_file.assert_called_once()
+        mock_client.delete_source.assert_called_once()

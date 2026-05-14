@@ -347,6 +347,11 @@ def replace_source_file_cmd(
         "--fallback-to-text",
         help="Route unsupported extensions to a text upload (UTF-8 only).",
     ),
+    atomic: bool = typer.Option(
+        False,
+        "--atomic",
+        help="ADD before DELETE so ADD failure preserves the original source (opt-in trial).",
+    ),
     profile: str | None = typer.Option(None, "--profile", "-p", help="Profile to use"),
 ) -> None:
     """Replace an existing source with a new local file upload.
@@ -358,9 +363,13 @@ def replace_source_file_cmd(
     Pass ``--fallback-to-text`` to route unsupported extensions (e.g.
     ``.json``, ``.py``) to a text-mode upload (UTF-8 only).
 
+    Pass ``--atomic`` to swap to add-first ordering (ADD failure leaves the
+    original source intact — closes the session-330 data-loss window).
+
     Example:
         nlm source replace-file <notebook-id> <source-id> ./new.md --confirm
         nlm source replace-file <notebook-id> <source-id> ./settings.json --confirm --fallback-to-text
+        nlm source replace-file <notebook-id> <source-id> ./CLAUDE.md --confirm --atomic
     """
     notebook_id = get_alias_manager().resolve(notebook_id)
     source_id = get_alias_manager().resolve(source_id)
@@ -380,10 +389,12 @@ def replace_source_file_cmd(
                 source_id,
                 file_path,
                 fallback_to_text=fallback_to_text,
+                atomic=atomic,
             )
         mode_label = " [yellow](text fallback)[/yellow]" if result.get("mode") == "text" else ""
+        atomic_label = " [cyan](atomic)[/cyan]" if atomic else ""
         console.print(
-            f"[green]✓[/green] Replaced source{mode_label}. "
+            f"[green]✓[/green] Replaced source{mode_label}{atomic_label}. "
             f"Old: {result['old_source_id']} → New: {result['new_source_id']}"
         )
         console.print(f"[dim]Title: {result['title']}[/dim]")

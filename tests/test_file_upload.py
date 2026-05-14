@@ -2,6 +2,7 @@
 
 import tempfile
 from pathlib import Path
+from typing import Any
 from unittest.mock import MagicMock, Mock, patch
 
 import httpx
@@ -78,6 +79,158 @@ class TestFileValidation:
         try:
             with pytest.raises(FileValidationError, match="Unsupported file type: .json"):
                 client.add_file("test-notebook-id", temp_path)
+        finally:
+            Path(temp_path).unlink()
+
+    # ──────────────────────────────────────────────────────────────────────
+    # ATOM-2 (260515): auto_wrap_to_md — fence-wrap unsupported extensions
+    # ──────────────────────────────────────────────────────────────────────
+
+    def test_auto_wrap_default_is_strict(self):
+        """`.py` + auto_wrap_to_md unset → existing FileValidationError (회귀 가드)."""
+        from notebooklm_tools.core.sources import SourceMixin
+
+        client = SourceMixin.__new__(SourceMixin)
+        client.cookies = {}
+        client.csrf_token = "test"
+        client._session_id = "test"
+        client._client = None
+
+        with tempfile.NamedTemporaryFile(mode="w", suffix=".py", delete=False) as f:
+            f.write("def hello():\n    return 'world'\n")
+            temp_path = f.name
+
+        try:
+            with pytest.raises(FileValidationError, match="Unsupported file type: .py"):
+                client.add_file("test-notebook-id", temp_path)
+        finally:
+            Path(temp_path).unlink()
+
+    def test_auto_wrap_unsupported_to_md_succeeds(self):
+        """`.py` + auto_wrap_to_md=True → 3-step upload routed via {stem}.py.md."""
+        from notebooklm_tools.core.sources import SourceMixin
+
+        client = SourceMixin.__new__(SourceMixin)
+        client.cookies = {}
+        client.csrf_token = "test"
+        client._session_id = "test"
+        client._client = None
+
+        captured: dict[str, Any] = {}
+
+        def _fake_register(notebook_id: str, filename: str) -> str:
+            captured["filename"] = filename
+            return "src-wrapped"
+
+        def _fake_start(_nb_id: str, filename: str, file_size: int, _src_id: str) -> str:
+            captured["upload_filename"] = filename
+            captured["upload_size"] = file_size
+            return "https://upload.example/url"
+
+        def _fake_stream(_url: str, file_path: Path) -> None:
+            captured["stream_path"] = Path(file_path)
+            captured["stream_content"] = Path(file_path).read_text(encoding="utf-8")
+
+        client._register_file_source = _fake_register  # type: ignore[attr-defined]
+        client._start_resumable_upload = _fake_start  # type: ignore[attr-defined]
+        client._upload_file_streaming = _fake_stream  # type: ignore[attr-defined]
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", delete=False, encoding="utf-8"
+        ) as f:
+            f.write("def greet():\n    return 'hi'\n")
+            temp_path = f.name
+
+        try:
+            result = client.add_file(
+                "test-notebook-id", temp_path, auto_wrap_to_md=True
+            )
+
+            # Filename must be {stem}.py.md (matrix SSOT — 꼬리 .md = 가공 표식)
+            assert captured["filename"].endswith(".py.md"), captured["filename"]
+            assert captured["upload_filename"] == captured["filename"]
+            assert result["title"] == captured["filename"]
+            assert result["id"] == "src-wrapped"
+
+            # Fence content must include python language hint + identifier banner
+            content = captured["stream_content"]
+            assert "```python" in content
+            assert "def greet():" in content
+            assert "Auto-fence-wrapped raw code" in content
+        finally:
+            Path(temp_path).unlink()
+
+    def test_auto_wrap_uses_typescript_fence_for_ts(self):
+        """`.ts` → fence with ``typescript`` language hint."""
+        from notebooklm_tools.core.sources import SourceMixin
+
+        client = SourceMixin.__new__(SourceMixin)
+        client.cookies = {}
+        client.csrf_token = "test"
+        client._session_id = "test"
+        client._client = None
+
+        captured: dict[str, str] = {}
+
+        client._register_file_source = lambda _nb, _fn: "src-ts"  # type: ignore[attr-defined]
+        client._start_resumable_upload = (  # type: ignore[attr-defined]
+            lambda _nb, _fn, _sz, _sid: "https://upload.example/url"
+        )
+
+        def _capture_stream(_url: str, file_path: Path) -> None:
+            captured["content"] = Path(file_path).read_text(encoding="utf-8")
+
+        client._upload_file_streaming = _capture_stream  # type: ignore[attr-defined]
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".ts", delete=False, encoding="utf-8"
+        ) as f:
+            f.write("export const x: number = 1;\n")
+            temp_path = f.name
+
+        try:
+            client.add_file("nb-1", temp_path, auto_wrap_to_md=True)
+            assert "```typescript" in captured["content"]
+        finally:
+            Path(temp_path).unlink()
+
+    def test_auto_wrap_cleanup_on_upload_failure(self):
+        """Streaming upload failure → temp dir still cleaned up (try-finally)."""
+        from notebooklm_tools.core.sources import SourceMixin
+
+        client = SourceMixin.__new__(SourceMixin)
+        client.cookies = {}
+        client.csrf_token = "test"
+        client._session_id = "test"
+        client._client = None
+
+        captured: dict[str, Path] = {}
+
+        client._register_file_source = lambda _nb, _fn: "src-fail"  # type: ignore[attr-defined]
+        client._start_resumable_upload = (  # type: ignore[attr-defined]
+            lambda _nb, _fn, _sz, _sid: "https://upload.example/url"
+        )
+
+        def _failing_stream(_url: str, file_path: Path) -> None:
+            captured["wrapped_path"] = Path(file_path)
+            raise FileUploadError("simulated network failure")
+
+        client._upload_file_streaming = _failing_stream  # type: ignore[attr-defined]
+
+        with tempfile.NamedTemporaryFile(
+            mode="w", suffix=".py", delete=False, encoding="utf-8"
+        ) as f:
+            f.write("x = 1\n")
+            temp_path = f.name
+
+        try:
+            with pytest.raises(FileUploadError, match="simulated network failure"):
+                client.add_file("nb-1", temp_path, auto_wrap_to_md=True)
+
+            # Load-bearing: temp dir must be cleaned up even on failure
+            wrapped_path = captured["wrapped_path"]
+            assert not wrapped_path.exists()
+            assert not wrapped_path.parent.exists()
         finally:
             Path(temp_path).unlink()
 

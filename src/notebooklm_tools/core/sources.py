@@ -16,6 +16,8 @@ HTTP resumable upload implementation adapted from notebooklm-py.
 """
 
 import logging
+import shutil
+import tempfile
 import textwrap
 import time
 from collections.abc import Iterator
@@ -31,6 +33,69 @@ from .exceptions import FileUploadError, FileValidationError
 from .retry import execute_with_retry
 
 logger = logging.getLogger(__name__)
+
+# Maps raw source extensions to GitHub-flavored markdown fence languages used
+# by ``add_file(auto_wrap_to_md=True)``. Unmapped extensions fall back to a
+# bare fence (no language hint).
+_FENCE_LANG_BY_EXT: dict[str, str] = {
+    ".py": "python",
+    ".pyi": "python",
+    ".ts": "typescript",
+    ".tsx": "typescript",
+    ".js": "javascript",
+    ".jsx": "javascript",
+    ".json": "json",
+    ".yaml": "yaml",
+    ".yml": "yaml",
+    ".toml": "toml",
+    ".sh": "bash",
+    ".bash": "bash",
+    ".rs": "rust",
+    ".go": "go",
+    ".rb": "ruby",
+    ".java": "java",
+    ".c": "c",
+    ".h": "c",
+    ".cpp": "cpp",
+    ".hpp": "cpp",
+}
+
+
+def _create_fence_wrapped_md(source_path: Path) -> Path:
+    """Wrap a raw code/structured-data file in a markdown fence and return
+    a temp ``{stem}{ext}.md`` path inside an isolated temp directory.
+
+    The deterministic ``{stem}{ext}.md`` filename matches the SIR-PAN matrix
+    SSOT (꼬리 ``.md`` = 가공 표식). The caller MUST ``shutil.rmtree`` the
+    parent directory after upload (try-finally).
+
+    Raises:
+        FileValidationError: If the source file cannot be decoded as UTF-8.
+    """
+    ext = source_path.suffix.lower()
+    lang = _FENCE_LANG_BY_EXT.get(ext, "")
+    try:
+        content = source_path.read_text(encoding="utf-8")
+    except UnicodeDecodeError as e:
+        raise FileValidationError(
+            f"Cannot decode as UTF-8 for auto_wrap_to_md: {source_path}"
+        ) from e
+
+    fence = (
+        f"> [!info] Auto-fence-wrapped raw code (source: {source_path.name})\n"
+        f"\n"
+        f"```{lang}\n"
+        f"{content}\n"
+        f"```\n"
+    )
+    temp_dir = Path(tempfile.mkdtemp(prefix="nlm-autowrap-"))
+    temp_path = temp_dir / f"{source_path.stem}{ext}.md"
+    try:
+        temp_path.write_text(fence, encoding="utf-8")
+    except Exception:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+        raise
+    return temp_path
 
 
 class _NotebookLookupProtocol(Protocol):
@@ -939,6 +1004,7 @@ class SourceMixin(BaseClient):
         file_path: str | Path,
         wait: bool = False,
         wait_timeout: float = 120.0,
+        auto_wrap_to_md: bool = False,
     ) -> dict[str, Any]:
         """Add a local file as a source using resumable upload.
 
@@ -956,6 +1022,12 @@ class SourceMixin(BaseClient):
             wait_timeout: Max seconds to wait if wait=True (default 120;
                 audio file uploads typically need a larger value — the
                 CLI's `--wait-timeout` flag defaults to 600s)
+            auto_wrap_to_md: Opt-in — when the file extension is not in
+                NLM's supported list (e.g. ``.py``, ``.ts``, ``.json``),
+                wrap the contents in a markdown code fence and upload as
+                ``{stem}{ext}.md`` so NLM's markdown parser activates
+                instead of rejecting the file. Default ``False`` preserves
+                strict-extension behavior. UTF-8 only.
 
         Returns:
             dict with 'id' and 'title' of the created source
@@ -1031,27 +1103,43 @@ class SourceMixin(BaseClient):
             ".webp",
         }
         file_extension = file_path.suffix.lower()
+        # ATOM-2 (260515): auto_wrap_to_md routes unsupported extensions through
+        # a deterministic ``{stem}{ext}.md`` temp file so NLM's markdown parser
+        # activates instead of rejecting the upload.
+        _autowrap_temp_dir: Path | None = None
         if file_extension not in supported_extensions:
-            raise FileValidationError(
-                f"Unsupported file type: {file_extension}\n"
-                f"Supported types: {', '.join(sorted(supported_extensions))}"
+            if not auto_wrap_to_md:
+                raise FileValidationError(
+                    f"Unsupported file type: {file_extension}\n"
+                    f"Supported types: {', '.join(sorted(supported_extensions))}"
+                )
+            wrapped_path = _create_fence_wrapped_md(file_path)
+            _autowrap_temp_dir = wrapped_path.parent
+            file_path = wrapped_path
+            filename = file_path.name
+            file_size = file_path.stat().st_size
+
+        try:
+            # Step 1: Register source intent → get SOURCE_ID
+            source_id = self._register_file_source(notebook_id, filename)
+
+            # Step 2: Start resumable upload → get upload URL
+            upload_url = self._start_resumable_upload(
+                notebook_id, filename, file_size, source_id
             )
 
-        # Step 1: Register source intent → get SOURCE_ID
-        source_id = self._register_file_source(notebook_id, filename)
+            # Step 3: Stream upload file content
+            self._upload_file_streaming(upload_url, file_path)
 
-        # Step 2: Start resumable upload → get upload URL
-        upload_url = self._start_resumable_upload(notebook_id, filename, file_size, source_id)
+            result = {"id": source_id, "title": filename}
 
-        # Step 3: Stream upload file content
-        self._upload_file_streaming(upload_url, file_path)
+            if wait:
+                return self.wait_for_source_ready(notebook_id, source_id, wait_timeout)
 
-        result = {"id": source_id, "title": filename}
-
-        if wait:
-            return self.wait_for_source_ready(notebook_id, source_id, wait_timeout)
-
-        return result
+            return result
+        finally:
+            if _autowrap_temp_dir is not None:
+                shutil.rmtree(_autowrap_temp_dir, ignore_errors=True)
 
     def get_source_guide(
         self,

@@ -183,6 +183,7 @@ def add_source(
     doc_type: str = "doc",
     wait: bool = False,
     wait_timeout: float = 120.0,
+    auto_wrap_to_md: bool = False,
 ) -> AddSourceResult:
     """Add a source to a notebook.
 
@@ -200,6 +201,10 @@ def add_source(
         doc_type: Drive doc type: doc|slides|sheets|pdf
         wait: Wait for source processing
         wait_timeout: Max seconds to wait
+        auto_wrap_to_md: For source_type=file only — wrap unsupported
+            extensions (.py/.ts/.json/...) in a markdown code fence and
+            upload as ``{stem}{ext}.md`` so NLM's markdown parser activates.
+            Default ``False`` preserves strict-extension behavior.
 
     Returns:
         AddSourceResult with source_type, source_id, title
@@ -254,7 +259,13 @@ def add_source(
         elif source_type == "file":
             if not file_path:
                 raise ValidationError("file_path is required for source_type='file'")
-            result = client.add_file(notebook_id, file_path, wait=wait, wait_timeout=wait_timeout)
+            result = client.add_file(
+                notebook_id,
+                file_path,
+                wait=wait,
+                wait_timeout=wait_timeout,
+                auto_wrap_to_md=auto_wrap_to_md,
+            )
             fallback_title = str(file_path).split("/")[-1]
             # title preservation (v5 결함 픽스, 260512): NLM은 add_file 시 filename을 title로 사용.
             # 사용자 지정 title 있으면 별도 rename RPC (b7Wfje) 호출. add_file은 항상 *Source-area*
@@ -787,6 +798,7 @@ def replace_source_file(
     file_path: str,
     *,
     fallback_to_text: bool = False,
+    atomic: bool = False,
 ) -> ReplaceSourceFileResult:
     """Replace an existing source by deleting it and uploading a new local file.
 
@@ -805,6 +817,14 @@ def replace_source_file(
     failure surfaces as ``ValidationError`` *before* the delete step (pre-delete
     safety). Default ``False`` preserves the original strict-extension behavior.
 
+    When ``atomic=True``, the order is reversed: ADD first, and only on success
+    is the old source DELETED. ADD failure leaves the original source intact,
+    closing the "delete succeeded but add failed" data-loss window observed in
+    session 330 (``~/.claude/CLAUDE.md`` source 분실 사고). ``atomic=False``
+    (default) preserves the legacy delete-first behavior — opt-in trial mode
+    until NLM Eventual Consistency / Ghost ID patterns (session 37) are fully
+    characterized for the brief same-file-twice window atomic mode opens.
+
     Args:
         client: Authenticated NotebookLM client
         notebook_id: Notebook UUID containing the source
@@ -812,6 +832,8 @@ def replace_source_file(
         file_path: Path to the local file to upload as the replacement
         fallback_to_text: Opt-in — route unsupported extensions to a text
             upload (UTF-8 only). Default ``False``.
+        atomic: Opt-in — perform ADD before DELETE so an ADD failure preserves
+            the original source. Default ``False`` (legacy delete-first).
 
     Returns:
         ReplaceSourceFileResult with old/new source IDs, title, path, and
@@ -823,9 +845,14 @@ def replace_source_file(
             an unsupported extension (and ``fallback_to_text=False``), or
             cannot be decoded as UTF-8 (with ``fallback_to_text=True``).
             All raised BEFORE any delete.
-        ServiceError: If delete or add fails. If delete succeeded but add
-            failed, the error message and ``user_message`` make this state
-            explicit (the original source is gone).
+        ServiceError: If delete or add fails. The error message and
+            ``user_message`` make the resulting state explicit:
+            - legacy mode (``atomic=False``): "delete succeeded but add
+              failed" → original source is gone, please re-add.
+            - atomic mode (``atomic=True``): either "add failed; original
+              preserved" (no DELETE fired) or "add succeeded but delete of
+              old source failed" (notebook now contains both — manual
+              cleanup required).
     """
     # 1. Pre-check — MUST run before any destructive operation
     p = Path(file_path)
@@ -876,47 +903,112 @@ def replace_source_file(
     except Exception:
         pass  # title preservation is optional; proceed without it
 
-    # 3. Delete the existing source (Composition — propagates ServiceError)
-    delete_source(client, source_id, notebook_id=notebook_id)
+    # 3 + 4. Apply add+delete in the order dictated by the ``atomic`` flag.
+    if atomic:
+        # ADD first — if ADD fails the original source is still intact.
+        try:
+            add_res = _do_add(
+                client,
+                notebook_id,
+                p,
+                use_text_fallback,
+                text_content,
+                preserved_title,
+            )
+        except (ValidationError, ServiceError) as e:
+            raise ServiceError(
+                f"Replace failed (atomic): add failed; original source preserved: {e}",
+                user_message=(
+                    "Replacement upload failed. The original source is still "
+                    "present in the notebook — no data loss."
+                ),
+                hint="Verify the file path and retry; no cleanup needed.",
+            ) from e
 
-    # 4. Add the new source (Composition). On failure, the original source is
-    # already gone — surface that explicitly so the user knows to re-add.
-    try:
-        if use_text_fallback:
-            assert text_content is not None  # narrowed by use_text_fallback branch
-            add_res = add_source(
+        # ADD succeeded → DELETE old source. If DELETE fails the notebook
+        # transiently contains both sources; surface that state explicitly
+        # so the caller can decide whether to retry the delete.
+        try:
+            delete_source(client, source_id, notebook_id=notebook_id)
+        except (ValidationError, ServiceError) as e:
+            raise ServiceError(
+                f"Replace failed (atomic): add succeeded but delete failed: {e}",
+                user_message=(
+                    f"New source {add_res['source_id']} uploaded successfully, "
+                    f"but deleting the old source {source_id} failed. The "
+                    "notebook now contains both — please retry deletion manually."
+                ),
+                hint=f"Retry: source_delete(source_id='{source_id}').",
+            ) from e
+    else:
+        # Legacy delete-first (default). Pre-checks above ensure the destructive
+        # step is preceded by all recoverable failure modes.
+        delete_source(client, source_id, notebook_id=notebook_id)
+
+        # On ADD failure the original source is already gone — surface that
+        # explicitly so the user knows to re-add.
+        try:
+            add_res = _do_add(
                 client,
                 notebook_id,
-                "text",
-                text=text_content,
-                title=preserved_title or p.name,
+                p,
+                use_text_fallback,
+                text_content,
+                preserved_title,
             )
-        else:
-            add_res = add_source(
-                client,
-                notebook_id,
-                "file",
-                file_path=str(p),
-                title=preserved_title,
-            )
-    except (ValidationError, ServiceError) as e:
-        raise ServiceError(
-            f"Replace failed: delete succeeded but add failed: {e}",
-            user_message=(
-                "Source was deleted but the replacement upload failed. "
-                "The original source is gone; please re-add the file manually."
-            ),
-            hint="Verify the file path and retry add_source.",
-        ) from e
+        except (ValidationError, ServiceError) as e:
+            raise ServiceError(
+                f"Replace failed: delete succeeded but add failed: {e}",
+                user_message=(
+                    "Source was deleted but the replacement upload failed. "
+                    "The original source is gone; please re-add the file manually."
+                ),
+                hint="Verify the file path and retry add_source.",
+            ) from e
 
     mode: Literal["file", "text"] = "text" if use_text_fallback else "file"
     fallback_suffix = " (fallback to text mode)" if use_text_fallback else ""
+    atomic_suffix = " (atomic)" if atomic else ""
     return {
         "notebook_id": notebook_id,
         "old_source_id": source_id,
         "new_source_id": add_res["source_id"],
         "title": add_res["title"],
         "file_path": str(p),
-        "message": f"Replaced source {source_id} with {add_res['source_id']}{fallback_suffix}",
+        "message": (
+            f"Replaced source {source_id} with {add_res['source_id']}"
+            f"{fallback_suffix}{atomic_suffix}"
+        ),
         "mode": mode,
     }
+
+
+def _do_add(
+    client: NotebookLMClient,
+    notebook_id: str,
+    p: Path,
+    use_text_fallback: bool,
+    text_content: str | None,
+    preserved_title: str | None,
+) -> AddSourceResult:
+    """Internal helper — dispatch the ADD half of replace_source_file.
+
+    Extracted so legacy and atomic modes share identical add semantics
+    (no drift in title preservation or text-fallback handling).
+    """
+    if use_text_fallback:
+        assert text_content is not None  # narrowed by use_text_fallback branch
+        return add_source(
+            client,
+            notebook_id,
+            "text",
+            text=text_content,
+            title=preserved_title or p.name,
+        )
+    return add_source(
+        client,
+        notebook_id,
+        "file",
+        file_path=str(p),
+        title=preserved_title,
+    )

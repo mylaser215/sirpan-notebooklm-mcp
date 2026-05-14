@@ -25,6 +25,7 @@ def source_add(
     doc_type: str = "doc",
     wait: bool = False,
     wait_timeout: float = 120.0,
+    auto_wrap_to_md: bool = False,
 ) -> ResultDict:
     """Add a source to a notebook. Unified tool for all source types.
 
@@ -46,12 +47,17 @@ def source_add(
         doc_type: Drive doc type: doc|slides|sheets|pdf (for source_type=drive)
         wait: If True, wait for source processing to complete before returning
         wait_timeout: Max seconds to wait if wait=True (default 120)
+        auto_wrap_to_md: For source_type=file only — wrap unsupported
+            extensions (.py/.ts/.json/...) in a markdown code fence and
+            upload as ``{stem}{ext}.md`` so NLM's markdown parser activates.
+            Default False preserves strict-extension behavior.
 
     Example:
         source_add(notebook_id="abc", source_type="url", url="https://example.com")
         source_add(notebook_id="abc", source_type="url", urls=["https://a.com", "https://b.com"])
         source_add(notebook_id="abc", source_type="url", url="https://example.com", wait=True)
         source_add(notebook_id="abc", source_type="file", file_path="/path/to/doc.pdf", wait=True)
+        source_add(notebook_id="abc", source_type="file", file_path="/path/to/script.py", auto_wrap_to_md=True)
     """
     try:
         client = get_client()
@@ -83,6 +89,7 @@ def source_add(
             doc_type=doc_type,
             wait=wait,
             wait_timeout=wait_timeout,
+            auto_wrap_to_md=auto_wrap_to_md,
         )
         return {"status": "success", "ready": wait, **single_result}
     except ValidationError as e:
@@ -236,6 +243,7 @@ def source_replace_file(
     file_path: str,
     confirm: bool = False,
     fallback_to_text: bool = False,
+    atomic: bool = False,
 ) -> ResultDict:
     """Replace an existing source by deleting it and uploading a new local file.
 
@@ -254,6 +262,10 @@ def source_replace_file(
     strict-extension behavior. The response ``mode`` field reports which
     path was taken (``"file"`` or ``"text"``).
 
+    When ``atomic=True``, ADD runs before DELETE so an ADD failure leaves
+    the original source intact (no data loss). Default ``False`` keeps the
+    legacy delete-first behavior — opt-in trial mode.
+
     Args:
         notebook_id: Notebook UUID containing the source
         source_id: Source UUID to replace
@@ -262,6 +274,8 @@ def source_replace_file(
             the old source is deleted before the new file is uploaded)
         fallback_to_text: Opt-in — route unsupported extensions to a text
             upload (UTF-8 only). Default ``False``.
+        atomic: Opt-in — perform ADD before DELETE so ADD failure preserves
+            the original source. Default ``False`` (legacy delete-first).
     """
     if not confirm:
         return error_result(
@@ -277,6 +291,7 @@ def source_replace_file(
             source_id,
             file_path,
             fallback_to_text=fallback_to_text,
+            atomic=atomic,
         )
         return {"status": "success", **result}
     except ValidationError as e:
