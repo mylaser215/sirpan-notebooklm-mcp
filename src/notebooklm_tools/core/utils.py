@@ -39,6 +39,7 @@ RPC_NAMES = {
     "AH0mwd": "delete_mind_map",
     "QDyure": "share_notebook",
     "JFMDGd": "get_share_status",
+    "AUrzMb": "suggest_share_emails",  # SDK 미구현, 디버그 로그용 매핑만 (base.py:147 박제)
     "KmcKPe": "revise_slide_deck",
 }
 

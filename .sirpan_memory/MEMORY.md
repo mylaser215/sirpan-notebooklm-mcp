@@ -21,8 +21,6 @@
 ## 핵심 todo
 - `260515-025300-atomic-trial-monitoring`: `source_replace_file(atomic=True)` trial 모니터링 (NLM Phase 4-A ●●● 권고). 단일 파일/저중요도 trial → Ghost ID 자극 패턴 관찰. 무재발 N건 누적 시 default 승격 검토
 - `260514-105956`: source_add state-level 결함 재발 모니터링 — `detail` 필드 보험 완료. 재발 시 dedup 또는 옛 source 정리로 우회 (NLM 측 transient)
-- `260513-1300-ts-codegen`: `.ts` 가공 도구 일반화 (`generate_py_md.py` 확장 또는 `generate_code_md.py`) — `generate_ts_md.py`로 부분 완료 (세션39)
-- `260513-000810`: 미매핑 RPC 3종 점검 (AUrzMb / JFMDGd / s0tc2d — `s0tc2d` 노트북 rename 신규 기능 후보)
 - `260512-202103`: `run_headless_auth` 자체 안정화 (백그라운드 silent fail, ThreadPoolExecutor None 반환)
 - `260512-173000`: `uv tool install --force` 캐시 결함 (우회 4-step 박제 — venv rm + `--no-cache --force`)
 

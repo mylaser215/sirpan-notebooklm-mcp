@@ -4,8 +4,14 @@ __pycache__/
 *$py.class
 *.so
 
-# NLM RAG 가공본 (scripts/generate_py_md.py 산출물 — 빌드 아티팩트, v6 중기 ②)
+# NLM RAG 가공본 (scripts/generate_code_md.py 산출물 — 빌드 아티팩트, v6 중기 ② → 세션44 통합)
 *.py.md
+*.ts.md
+*.tsx.md
+# 회귀 fixture는 추적 대상 (ground-truth 박제)
+!tests/fixtures/**/*.py.md
+!tests/fixtures/**/*.ts.md
+!tests/fixtures/**/*.tsx.md
 .Python
 build/
 develop-eggs/
