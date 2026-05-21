@@ -1,7 +1,11 @@
 """Notebook tools - Notebook management operations."""
 
+from pathlib import Path
+
 from ...services import ServiceError
 from ...services import notebooks as notebooks_service
+from ...services.sync_helpers import detect_drift as _detect_drift
+from ...services.sync_helpers import format_drift_summary
 from ._utils import ResultDict, error_result, get_client, logged_tool
 
 
@@ -163,6 +167,44 @@ def notebook_delete(notebook_id: str, confirm: bool = False) -> ResultDict:
         client = get_client()
         result = notebooks_service.delete_notebook(client, notebook_id)
         return {"status": "success", **result}
+    except ServiceError as e:
+        return error_result(e.user_message, hint=e.hint)
+    except Exception as e:
+        return error_result(str(e))
+
+
+@logged_tool()
+def detect_drift(notebook_id: str, vault_root: str | None = None) -> ResultDict:
+    """Detect drift between NLM notebook sources and disk files.
+
+    Maps each source title to a disk path under the vault root and classifies
+    every source as matched / missing (NLM 잔재) / ambiguous (다중 매칭) /
+    skip_type. Used as step ⑥ of the daily NLM sync routine — surfaces stale
+    sources before they accumulate beyond NLM Pro quota.
+
+    Args:
+        notebook_id: Notebook UUID to inspect.
+        vault_root: Vault root override. ``None`` (default) delegates to the
+            ``SIRPAN_VAULT`` env var, then to the hard-coded fallback inside
+            ``sync_helpers.get_vault_root``. Pass an explicit path only to
+            override both.
+
+    Returns:
+        report — full DriftReport TypedDict (matched / matched_markdown /
+            matched_non_markdown / missing / ambiguous / skip_type + total).
+        summary — human-friendly one-line + detail string (the same output
+            previously produced by the inline ``format_drift_summary`` call).
+    """
+    try:
+        client = get_client()
+        vault = Path(vault_root) if vault_root else None
+        report = _detect_drift(
+            client.get_notebook_sources_with_types,
+            notebook_id,
+            vault_root=vault,
+        )
+        summary = format_drift_summary(report)
+        return {"status": "success", "report": report, "summary": summary}
     except ServiceError as e:
         return error_result(e.user_message, hint=e.hint)
     except Exception as e:

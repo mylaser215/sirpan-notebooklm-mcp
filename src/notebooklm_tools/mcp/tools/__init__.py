@@ -13,6 +13,7 @@ from .exports import (
     export_artifact,
 )
 from .notebooks import (
+    detect_drift,
     notebook_create,
     notebook_delete,
     notebook_describe,
@@ -57,13 +58,14 @@ __all__ = [
     # Auth (2)
     "refresh_auth",
     "save_auth_tokens",
-    # Notebooks (6)
+    # Notebooks (7 — incl. detect_drift)
     "notebook_list",
     "notebook_get",
     "notebook_describe",
     "notebook_create",
     "notebook_rename",
     "notebook_delete",
+    "detect_drift",
     # Sources (7)
     "source_add",
     "source_list_drive",
