@@ -174,6 +174,15 @@ class ResearchMixin(BaseClient):
                     report = src[6][0]
                     break
 
+            # Inject report body into the first deep-report source row so the
+            # importer can package it as a source (mirrors NLM browser behavior
+            # — manual "Import" click sends the deep report itself as source 0).
+            if report:
+                for src_entry in sources:
+                    if src_entry.get("result_type") in (3, 5) and not src_entry.get("body"):
+                        src_entry["body"] = report
+                        break
+
             # Determine status (1 = in_progress, 2 = completed, 6 = imported/completed)
             status = "completed" if status_code in (2, 6) else "in_progress"
 
@@ -231,6 +240,11 @@ class ResearchMixin(BaseClient):
         """Parse sources from research response.
 
         Handles both fast and deep research source formats.
+
+        New NLM structure (260523 LBwxtb capture, deep mode):
+            deep report: [None, [title, body], None, 3, None×6, 3]
+            web source : [None, None, [url, title], None×7, 2]
+        Legacy structures retained as fallback for fast mode and back-compat.
         """
         sources = []
         if not isinstance(sources_data, list) or len(sources_data) == 0:
@@ -240,16 +254,66 @@ class ResearchMixin(BaseClient):
             if not isinstance(src, list) or len(src) < 2:
                 continue
 
-            # Check if this is deep research format (src[0] is None, src[1] is title)
+            # New NLM deep-report shape: src[0]=None, src[1]=[title, body]
+            if (
+                src[0] is None
+                and isinstance(src[1], list)
+                and len(src[1]) >= 2
+                and isinstance(src[1][0], str)
+                and isinstance(src[1][1], str)
+            ):
+                title = src[1][0]
+                body = src[1][1]
+                result_type = src[3] if len(src) > 3 and isinstance(src[3], int) else 3
+                sources.append(
+                    {
+                        "index": idx,
+                        "url": "",
+                        "title": title,
+                        "description": "",
+                        "body": body,
+                        "result_type": result_type,
+                        "result_type_name": (
+                            constants.RESULT_TYPES.get_name(result_type) or "deep_report"
+                        ),
+                    }
+                )
+                continue
+
+            # New NLM web-source shape: src[0]=None, src[1]=None, src[2]=[url, title]
+            if (
+                src[0] is None
+                and (len(src) < 2 or src[1] is None)
+                and len(src) > 2
+                and isinstance(src[2], list)
+                and len(src[2]) >= 2
+                and isinstance(src[2][0], str)
+                and isinstance(src[2][1], str)
+            ):
+                url = src[2][0]
+                title = src[2][1]
+                result_type = src[-1] if isinstance(src[-1], int) else 1
+                sources.append(
+                    {
+                        "index": idx,
+                        "url": url,
+                        "title": title,
+                        "description": "",
+                        "result_type": result_type,
+                        "result_type_name": constants.RESULT_TYPES.get_name(result_type),
+                    }
+                )
+                continue
+
+            # Legacy deep research format (src[1] was the title string directly)
             if src[0] is None and len(src) > 1 and isinstance(src[1], str):
-                # Deep research format
                 title = src[1] if isinstance(src[1], str) else ""
                 result_type = src[3] if len(src) > 3 and isinstance(src[3], int) else 5
 
                 sources.append(
                     {
                         "index": idx,
-                        "url": "",  # Deep research doesn't have URLs in source list
+                        "url": "",
                         "title": title,
                         "description": "",
                         "result_type": result_type,
@@ -257,7 +321,7 @@ class ResearchMixin(BaseClient):
                     }
                 )
             elif isinstance(src[0], str) or len(src) >= 3:
-                # Fast research format: [url, title, desc, type, ...]
+                # Legacy fast research format: [url, title, desc, type, ...]
                 url = src[0] if isinstance(src[0], str) else ""
                 title = src[1] if len(src) > 1 and isinstance(src[1], str) else ""
                 desc = src[2] if len(src) > 2 and isinstance(src[2], str) else ""
@@ -303,11 +367,33 @@ class ResearchMixin(BaseClient):
         for src in sources:
             url = src.get("url", "")
             title = src.get("title", "Untitled")
+            body = src.get("body", "")
             result_type = src.get("result_type", 1)
 
-            # Skip deep_report sources (type 5) - these are research reports, not importable
-            # Also skip sources with empty URLs
-            if result_type == 5 or not url:
+            # Deep report (result_type=3 + body present, or legacy type=5 still
+            # delivered with body): packages the markdown report itself as a
+            # source. Real NLM payload (260523 capture): slot[1]=[title, body],
+            # slot[3]=3, slot[10]=3.
+            if body and result_type in (3, 5):
+                source_data = [
+                    None,
+                    [title, body],
+                    None,
+                    3,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    None,
+                    3,
+                ]
+                source_array.append(source_data)
+                continue
+
+            # Skip purely-empty rows (legacy deep_report with no body, or
+            # malformed entries with no URL).
+            if not url:
                 continue
 
             if result_type == 1:
@@ -369,7 +455,11 @@ class ResearchMixin(BaseClient):
 
             source_array.append(source_data)
 
-        params = [None, [1], task_id, notebook_id, source_array]
+        # Slot 0: research-mode config envelope. Captured 260523 from real NLM
+        # browser client for a Deep Research import. Matches the inner shape
+        # NLM sends with start_research; previous None caused import to drop.
+        slot_0 = [2, None, None, [1, None, None, None, None, None, None, None, None, None, [1]]]
+        params = [slot_0, [1], task_id, notebook_id, source_array]
         result = self._call_rpc(
             self.RPC_IMPORT_RESEARCH, params, f"/notebook/{notebook_id}", timeout=timeout
         )

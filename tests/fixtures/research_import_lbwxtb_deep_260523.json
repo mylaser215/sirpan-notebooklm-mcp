@@ -1,0 +1,104 @@
+{
+  "captured_at": "2026-05-23",
+  "source": "Brave DevTools Network — NLM notebook d1675c65 deep research import click",
+  "rpc_id": "LBwxtb",
+  "url_template": "https://notebooklm.google.com/_/LabsTailwindUi/data/batchexecute?rpcids=LBwxtb&source-path=/notebook/{notebook_id}",
+  "task_id": "98aaaa38-aabe-4721-9d93-3be526d747a0",
+  "notebook_id": "d1675c65-d349-4d09-926b-3a26a7461963",
+  "params": [
+    [
+      2,
+      null,
+      null,
+      [
+        1,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        [
+          1
+        ]
+      ]
+    ],
+    [
+      1
+    ],
+    "98aaaa38-aabe-4721-9d93-3be526d747a0",
+    "d1675c65-d349-4d09-926b-3a26a7461963",
+    [
+      [
+        null,
+        [
+          "Ergonomic Human-Machine Interface Design for Field and Automotive Progressive Web Applications",
+          "# Ergonomic Human-Machine Interface Design for Field and Automotive Progressive Web Applications\n\n## Automotive Ergonomics and Cradle-Mounted Touch Interactions\n\nDesigning a Progressive Web Application (PWA) for vehicle-mounted devices or active field workers requires a rigorous understanding of physical, environmental, and cognitive constraints. Unlike traditional mobile applications operated in controlled, sedentary settings, in-vehicle interfaces are subject to high-frequency physical vibrations, variable mounting distances, and a lack of stabilizing contact points.[1, 2, 3] When a mobile d...[TRUNCATED_FOR_FIXTURE]"
+        ],
+        null,
+        3,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        3
+      ],
+      [
+        null,
+        null,
+        [
+          "https://docs.partner.android.com/drivingux/automotive-os/design-system/color",
+          "Color | Design for Driving | Android Partners"
+        ],
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        2
+      ],
+      [
+        null,
+        null,
+        [
+          "https://ux.stackexchange.com/questions/134227/what-are-the-best-practices-to-design-user-interfaces-that-are-going-to-be-used",
+          "usability - What are the best practices to design user interfaces that ..."
+        ],
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        2
+      ],
+      [
+        null,
+        null,
+        [
+          "https://medium.com/@callumjcoe/industrial-ux-sunlight-susceptible-screens-2e52b1d9706b",
+          "Industrial UX: Sunlight Susceptible Screens | by Callum | Medium"
+        ],
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        null,
+        2
+      ]
+    ]
+  ],
+  "original_body_chars": 44694,
+  "original_source_count": 49,
+  "note": "Deep report body truncated; first 3 web sources kept. Use for structural regression — slot 0 + source_array shape."
+}

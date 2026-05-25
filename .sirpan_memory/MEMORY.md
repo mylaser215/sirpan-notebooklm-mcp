@@ -4,14 +4,14 @@
 - 세션아카이브: `000-시스템/070-세션로그/notebooklm-mcp_세션아카이브.md`
 - 타임라인: `000-시스템/070-세션로그/notebooklm-mcp_작업타임라인.md`
 
-## 현재 상태 (260515-세션43·묶음D 배치교차삼단시공·`atomic` + `auto_wrap_to_md` 신설)
+## 현재 상태 (260525-세션44·research_import 픽스·NLM schema 변경 대응)
 - **NotebookLM MCP v0.5.23+** — Python/uv/FastMCP, 포트 9472
 - GitHub: mylaser215/sirpan-notebooklm-mcp (fork from jacob-bd/notebooklm-mcp-cli)
-- ✅ **묶음D 완료** (세션43 26-05-15): NLM 동기화 보강 2종 — `replace_source_file(atomic=True)` ADD-first 분실 차단 + `add_file(auto_wrap_to_md=True)` fence-wrap 임시 `.md` 업로드 + 글로벌 CLAUDE.md 박제. opt-in default False (Ghost ID 회귀 차단 trial). NLM Phase 4-A 사후 ✅ 3축. plan 묶음A/B/C/D 4/4 close
-- ✅ **v6 졸업** (세션36 26-05-13): NLM동기화 정책 대전환 단기3+중기3+장기4 = 10건. `generate_py_md.py` + `fallback_to_text` + 매트릭스 정정(꼬리 `.md` = 가공 SSOT) 박제
-- ✅ **세션37 source_add 진단 종결** (260514, commit `67a3eb7`): state-level 결함 NLM transient + Source-Note 라우팅 별 결함 아님 확정. `detail` 필드 8 wrappers
+- ✅ **세션44 완료** (260524): `research_import` 픽스 — NLM 백엔드 schema 변경 대응. `LBwxtb` 슬롯 0 envelope `[2, null, null, [1, null×9, [1]]]` inject + deep report `body` 주입 + `_parse_research_sources` 신구조 분기 2종 (`src[1]=[title,body]` deep / `src[2]=[url,title]` web). 실측 검증 2회: 35건+38건 import 성공 (이전 0건 silent drop). 회귀 7건 신규 (`TestNewNLMSourceShape`) + 실측 fixture 박제
+- ✅ **묶음D 완료** (세션43 26-05-15): NLM 동기화 보강 2종 — `replace_source_file(atomic=True)` + `add_file(auto_wrap_to_md=True)` + 글로벌 CLAUDE.md 박제. opt-in default False (Ghost ID 회귀 차단 trial)
+- ✅ **v6 졸업** (세션36 26-05-13): NLM동기화 정책 대전환 10건. `generate_py_md.py` + `fallback_to_text` + 매트릭스 정정 박제
 - ✅ v5 후속 Studio 13건 + v5 본 9건 + v4 결함 픽스 + refresh_auth fail-close
-- 회귀 영구 가드: v4 1건 + v5 9건 + Q5 후속 12건 + refresh_auth 5건 + sources detail 보강 + ATOM-1·2 8건 = **35건+** Green
+- 회귀 영구 가드: v4 1건 + v5 9건 + Q5 12건 + refresh_auth 5건 + sources detail + ATOM-1·2 8건 + research_import 7건 = **42건+** Green
 
 ## 허브 추적
 - [[NotebookLM MCP 안정화 프로젝트 (v6 — 동기화 정책 대전환·파일 종류별 분기·md 래핑 도구화)]] 💎 done-keep 졸업 (세션36 마감)
@@ -19,14 +19,16 @@
 - [[NotebookLM MCP 안정화 프로젝트 (v4 — clone_add_file register RPC payload 구조 결함)]] 💎 done-keep
 
 ## 핵심 todo
-- `260515-025300-atomic-trial-monitoring`: `source_replace_file(atomic=True)` trial 모니터링 (NLM Phase 4-A ●●● 권고). 단일 파일/저중요도 trial → Ghost ID 자극 패턴 관찰. 무재발 N건 누적 시 default 승격 검토
-- `260514-105956`: source_add state-level 결함 재발 모니터링 — `detail` 필드 보험 완료. 재발 시 dedup 또는 옛 source 정리로 우회 (NLM 측 transient)
-- `260512-202103`: `run_headless_auth` 자체 안정화 (백그라운드 silent fail, ThreadPoolExecutor None 반환)
-- `260512-173000`: `uv tool install --force` 캐시 결함 (우회 4-step 박제 — venv rm + `--no-cache --force`)
+- `260525-025900-research-import-residual-skip-3`: 41→38 잔존 3건 미import 분석 (세션44 검증). url 빈 source skip 로직 정정 또는 신규 src 구조 분기. 별 세션에서 e3bVqc raw 캡쳐부터
+- `260523-015000-media-source-expansion-plan`: NLM 멀티미디어 소스 확장 (유튜브/이미지/오디오/비디오). 파일 다이얼로그 확장자 ~40종 실측 + 4종 UI 분류. 별 세션 단서 캡쳐 후 시공
+- `260523-011412`: MCP 서버 진입 도구 발견 패턴 정착 (ToolSearch 키워드 + description 재독 + 매트릭스 박제)
+- `260515-025300-atomic-trial-monitoring`: `source_replace_file(atomic=True)` trial (1건 누적, N건 후 default 승격)
+- `260514-105956`: `source_add` state-level 결함 재발 모니터링
+- `260512-202103`: `run_headless_auth` 안정화 (silent fail)
 
 ## 최근 세션
-- 세션43 (260515): 묶음D 배치교차삼단시공 — `replace_source_file(atomic=True)` ADD-first + `add_file(auto_wrap_to_md=True)` fence-wrap 임시 `.md` + 글로벌 CLAUDE.md 라인 116 박제 bullet 2개. 회귀 860 PASS (852+8 신규+1 픽스). NLM Phase 4-A ✅ 3축. plan 4/4 close
-- 세션42 (260515): 묶음C 이단시공 — `session_save.py:1804` *timeline_row* `세션N` 자동 치환 부작용 픽스 (D안: `_validate_timeline_row` ATOM-A 확장). 4 케이스 dry-run OK
-- 세션41 (260514): 묶음B 단교차삼단시공 — `cdp.py` `tries` 5→30 통일 + logger 가시화 + AUrzMb 박제
-- 세션40 (260514): 묶음A 직접 Edit — `generate_ts_md.py` regex 보강 + uv 캐시 결함 우회 4-step 박제
-- 세션37 (260514): source_add state-level 진단 + Source-Note 라우팅 별 결함 아님 확정. `detail` 필드 8 wrappers (commit `67a3eb7`)
+- 세션44 (260524): `research_import` 픽스 — NLM `LBwxtb` slot 0 envelope + deep report body 주입 + parse 신구조 2종. 회귀 7건. 검증 2회 (35→38건 import). c:\2.txt 사용자 실측 캡쳐 기반. CHANGELOG `[Unreleased]` 항목 추가
+- 세션43 (260515): 묶음D 배치교차삼단시공 — `atomic=True` + `auto_wrap_to_md=True` + 글로벌 CLAUDE.md 박제. 회귀 860 PASS
+- 세션42 (260515): 묶음C 이단시공 — `session_save.py:1804` *timeline_row* 자동 치환 부작용 픽스
+- 세션41 (260514): 묶음B 단교차삼단시공 — `cdp.py` `tries` 5→30 + AUrzMb 박제
+- 세션40 (260514): 묶음A — `generate_ts_md.py` regex + uv 캐시 우회 4-step 박제

@@ -5,6 +5,11 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+- **`research_import` silent drop after NLM backend schema change (deep mode)** — The browser frontend's LBwxtb (Import Research Sources) RPC now requires a 5-slot params array where slot 0 holds a research-mode config envelope (`[2, null, null, [1, null×9, [1]]]`); the prior `None` placeholder caused NLM to drop the entire import. Also: deep research reports are now packaged as a real importable source — `_parse_research_sources` recognizes the new `[None, [title, body], …]` shape, `poll_research` injects the out-of-band `report` body into the first deep-report entry when the source row itself lacks one, and `import_research_sources` builds the matching `[None, [title, body], None, 3, …, 3]` row. Verified end-to-end against two live deep research notebooks (35→38 import on identical query class). Regression: `tests/core/test_research.py::TestNewNLMSourceShape` (7 cases) + captured fixture `tests/fixtures/research_import_lbwxtb_deep_260523.json`.
+
 ## [0.5.23] - 2026-04-12
 
 ### Added
