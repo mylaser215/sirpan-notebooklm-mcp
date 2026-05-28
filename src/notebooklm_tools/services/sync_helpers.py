@@ -110,19 +110,33 @@ def _narrow_by_priority(matches: list[Path], vault_root: Path) -> list[Path]:
     return matches
 
 
-def _narrow_nlm_seed(title: str, matches: list[Path]) -> list[Path]:
-    """nlm_seed.md 다중 매칭 시 title 메타 키워드로 스킬 좁히기.
+def _narrow_by_folder_hint(title: str, matches: list[Path]) -> list[Path]:
+    """title 안 폴더 hint로 다중 매칭 좁히기.
 
-    parent 폴더명이 *정확히* skill 이름과 일치하는지 검사
+    호환 (NLM_SEED_SKILL_KEYWORDS): 한글 메타 키워드(`단교차`/`배치교차`/`시스템정비`)가
+    title에 있으면 매핑 폴더로 좁힘. nlm_seed.md 기존 호출자 자연 흡수.
+
+    신규 (v7, 260528 ATOM-2): 모든 파일에 `{filename} ({folder})` 패턴 영문 폴더명
+    직접 매칭 적용. 동명 다폴더 ambiguous → matched 결정론 전환.
+
+    parent 폴더명이 *정확히* hint와 일치하는지 검사
     (substring 매칭은 cross_3step_solver ⊂ batch_cross_3step_solver 충돌).
     """
     if len(matches) <= 1:
         return matches
+    # 호환: 한글 키워드 매핑 (nlm_seed.md 기존 호출자)
     for keyword, skill in NLM_SEED_SKILL_KEYWORDS.items():
         if keyword in title:
             narrowed = [p for p in matches if p.parent.name == skill]
             if len(narrowed) == 1:
                 return narrowed
+    # 신규: 영문 폴더명 직접 매칭 (`{filename} ({folder})` 패턴)
+    m = re.search(r"\(([^,)]+)\)", title)
+    if m:
+        folder_name = m.group(1).strip()
+        narrowed = [p for p in matches if p.parent.name == folder_name]
+        if len(narrowed) == 1:
+            return narrowed
     return matches
 
 
@@ -145,13 +159,13 @@ def find_disk_path(title: str, *, vault_root: Path | None = None) -> list[Path]:
     # 3. 볼트 글로브
     matches = _glob_vault(fname, root)
 
-    # 4. nlm_seed.md 메타 키워드로 좁히기 (우선순위 폴더보다 먼저)
-    if fname == "nlm_seed.md":
-        narrowed = _narrow_nlm_seed(title, matches)
-        if len(narrowed) == 1:
-            return narrowed
+    # 4. 폴더 hint로 좁히기 (우선순위 폴더보다 먼저)
+    #    호환: nlm_seed.md NLM_SEED_SKILL_KEYWORDS 매핑 + 신규: 모든 파일 `{name} ({folder})` 패턴
+    narrowed = _narrow_by_folder_hint(title, matches)
+    if len(narrowed) == 1:
+        return narrowed
 
-    matches = _narrow_by_priority(matches, root)
+    matches = _narrow_by_priority(narrowed, root)
     if len(matches) == 1:
         return matches
 

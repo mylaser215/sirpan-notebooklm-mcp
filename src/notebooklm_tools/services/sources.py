@@ -76,6 +76,11 @@ SUPPORTED_FILE_EXTS = frozenset(
     }
 )
 
+# 동명 파일 다폴더 자동 폴더명 박제 대상 (v7, 260528 ATOM-1)
+# title 미지정 + 본 frozenset 매칭 시 add_source가 자동으로 `{basename} ({parent_folder})` 형태 박제.
+# drift detect_drift ambiguous 차단 (sync_helpers._narrow_by_folder_hint와 짝).
+DUP_FILENAMES_AUTO_FOLDER_TAG: frozenset[str] = frozenset({"SKILL.md", "nlm_seed.md"})
+
 
 class AddSourceResult(TypedDict):
     """Result of adding a source."""
@@ -267,6 +272,13 @@ def add_source(
                 auto_wrap_to_md=auto_wrap_to_md,
             )
             fallback_title = str(file_path).split("/")[-1]
+            # 동명 파일 자동 폴더명 박제 (v7, 260528 ATOM-1 — drift ambiguous 차단)
+            # title 미지정 + DUP_FILENAMES_AUTO_FOLDER_TAG 매칭 시 `{basename} ({parent})` 자동 박제.
+            if not title:
+                _p = Path(file_path)
+                if _p.name in DUP_FILENAMES_AUTO_FOLDER_TAG:
+                    title = f"{_p.name} ({_p.parent.name})"
+                    fallback_title = title
             # title preservation (v5 결함 픽스, 260512): NLM은 add_file 시 filename을 title로 사용.
             # 사용자 지정 title 있으면 별도 rename RPC (b7Wfje) 호출. add_file은 항상 *Source-area*
             # 등록이므로 source_type 인자 생략 (None) — 일반 Source RPC 라우팅. Real Note(list_notes

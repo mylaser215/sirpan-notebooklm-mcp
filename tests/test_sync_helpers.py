@@ -206,3 +206,115 @@ def test_mcp_detect_drift_vault_root_none_uses_env(
     assert result["status"] == "success"
     assert result["report"]["total"] == 1
     assert len(result["report"]["matched"]) == 1
+
+
+# v7 (260528 ATOM-3) — `{filename} ({folder})` 결정론 매칭 회귀 가드
+# 동명 다폴더 ambiguous → matched 전환 검증 (SKILL.md / nlm_seed.md 5건 잔재 사례 박제).
+
+
+@pytest.fixture
+def vault_with_folder_hint_files(tmp_path: Path) -> Path:
+    """동명 파일 + 영문 폴더 hint 구조 (외부 ~/.claude/skills 다폴더 모방)."""
+    (tmp_path / "skill_a").mkdir()
+    (tmp_path / "skill_b").mkdir()
+    (tmp_path / "skill_a" / "shared.md").write_text("a", encoding="utf-8")
+    (tmp_path / "skill_b" / "shared.md").write_text("b", encoding="utf-8")
+    return tmp_path
+
+
+def test_detect_drift_folder_hint_matches(
+    vault_with_folder_hint_files: Path,
+) -> None:
+    """`{filename} ({folder})` 패턴 → 결정론 matched (ATOM-2 핵심 — v7 5건 잔재 케이스)."""
+    fetcher = _make_fetcher([
+        {
+            "id": "sa",
+            "title": "shared.md (skill_a)",
+            "source_type_name": "generated_text",
+        },
+    ])
+    report = detect_drift(fetcher, "nb1", vault_root=vault_with_folder_hint_files)
+
+    assert len(report["matched"]) == 1
+    assert len(report["ambiguous"]) == 0
+    assert report["matched"][0]["source_id"] == "sa"
+    assert "skill_a" in report["matched"][0]["disk_path"]
+
+
+def test_detect_drift_folder_hint_no_match_falls_back(
+    vault_with_folder_hint_files: Path,
+) -> None:
+    """`{filename} ({nonexistent})` → 폴더 hint 매칭 실패 → ambiguous 유지."""
+    fetcher = _make_fetcher([
+        {
+            "id": "sb",
+            "title": "shared.md (nonexistent_folder)",
+            "source_type_name": "generated_text",
+        },
+    ])
+    report = detect_drift(fetcher, "nb1", vault_root=vault_with_folder_hint_files)
+
+    assert len(report["ambiguous"]) == 1
+    assert len(report["matched"]) == 0
+
+
+def test_detect_drift_no_hint_still_ambiguous(
+    vault_with_folder_hint_files: Path,
+) -> None:
+    """순수 파일명 (폴더 hint 0) → ambiguous 유지 (호환 — 박제 가설 회귀 차단)."""
+    fetcher = _make_fetcher([
+        {"id": "sn", "title": "shared.md", "source_type_name": "generated_text"},
+    ])
+    report = detect_drift(fetcher, "nb1", vault_root=vault_with_folder_hint_files)
+
+    assert len(report["ambiguous"]) == 1
+    assert len(report["matched"]) == 0
+
+
+def test_detect_drift_v7_real_residual_cases(tmp_path: Path) -> None:
+    """v7 실 NLM 잔재 5건 케이스 직접 박제 — 영문 폴더명 직접 매칭 우월성.
+
+    실측 (1ffa3a16, 260528): NLM 박제 title이 순수 `SKILL.md` / `nlm_seed.md`만
+    이라 ambiguous 5건 누적. ATOM-1 박제 후 `{filename} ({folder})` 패턴이
+    `find_disk_path` 결정론 매칭에 흡수되어야 함.
+
+    NLM_SEED_SKILL_KEYWORDS 한글 키워드 매핑은 `extract_filename`이 한글 prefix를
+    떼지 못해 glob 0건이 되므로 *실측 NLM title 구조에서는 dead code*임을 확인.
+    영문 폴더명 직접 매칭 (`_narrow_by_folder_hint` 신규 분기)만이 유효 경로.
+    """
+    # 실 skill 폴더 모방 (cross_3step_solver / batch_cross_3step_solver)
+    base = tmp_path / "skills_mock"
+    (base / "cross_3step_solver").mkdir(parents=True)
+    (base / "batch_cross_3step_solver").mkdir(parents=True)
+    (base / "cross_3step_solver" / "nlm_seed.md").write_text("a", encoding="utf-8")
+    (base / "batch_cross_3step_solver" / "nlm_seed.md").write_text(
+        "b", encoding="utf-8"
+    )
+
+    # 영문 폴더명 직접 매칭 (ATOM-1로 박제된 신규 title 형식) → matched
+    fetcher_with_hint = _make_fetcher([
+        {
+            "id": "v7",
+            "title": "nlm_seed.md (cross_3step_solver)",
+            "source_type_name": "generated_text",
+        },
+    ])
+    report = detect_drift(fetcher_with_hint, "nb1", vault_root=tmp_path)
+    assert len(report["matched"]) == 1
+    assert "cross_3step_solver" in report["matched"][0]["disk_path"]
+    assert (
+        "batch_cross_3step_solver" not in report["matched"][0]["disk_path"]
+    )
+
+    # 한글 키워드 매핑은 extract_filename 결함으로 dead code (호환 매핑 발동 X) → ambiguous 유지
+    fetcher_korean = _make_fetcher([
+        {
+            "id": "kr",
+            "title": "단교차 nlm_seed.md",
+            "source_type_name": "generated_text",
+        },
+    ])
+    report_kr = detect_drift(fetcher_korean, "nb1", vault_root=tmp_path)
+    # extract_filename 결함으로 glob 0건 → missing (호환 매핑 실제 발동 X)
+    assert len(report_kr["missing"]) == 1
+    assert len(report_kr["matched"]) == 0
