@@ -11,6 +11,7 @@ NLM 동기화 본 흐름의 *영구 라이브러리*. ``force_v4_resync.py``의 
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from collections.abc import Callable
@@ -188,14 +189,17 @@ def find_disk_path(title: str, *, vault_root: Path | None = None) -> list[Path]:
     return matches
 
 
-class DriftEntry(TypedDict):
+class DriftEntry(TypedDict, total=False):
+    """drift 분류 1건. total=False — 신규 옵셔널 키 (bundle_origins) 호환."""
+
     source_id: str
     title: str
     type_name: str
-    status: str  # "matched" | "missing" | "ambiguous" | "skip_type"
+    status: str  # "matched" | "missing" | "ambiguous" | "skip_type" | "matched_bundle"
     disk_path: str | None
     candidates: list[str]
     markdown_relevant: bool  # True 면 .md → markdown 파서 라우팅 적용 대상 (v4 결함 학습)
+    bundle_origins: list[str]  # 옵셔널 — matched_bundle 시 원본 N개 경로 (Tier 2 번들)
 
 
 class DriftReport(TypedDict):
@@ -204,9 +208,58 @@ class DriftReport(TypedDict):
     matched: list[DriftEntry]
     matched_markdown: list[DriftEntry]  # matched 중 .md 확장자만 — 진짜 markdown 라우팅 후보
     matched_non_markdown: list[DriftEntry]  # matched 중 .py/.json/.ts 등 — plain text 정상
+    matched_bundle: list[DriftEntry]  # Tier 2 N:1 번들 (registry 매칭) — Batch 3 신설
     missing: list[DriftEntry]
     ambiguous: list[DriftEntry]
     skip_type: list[DriftEntry]
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 N:1 번들 매핑 (Batch 3 ATOM-1)
+# ---------------------------------------------------------------------------
+
+_BUNDLE_TITLE_RE = re.compile(r"^(?P<name>[\w-]+_Bundle)\.md\b", re.IGNORECASE)
+
+
+def _default_bundle_registry_path() -> Path:
+    return get_vault_root() / "000-시스템" / "030-Configs" / "시스템환경" / "nlm_bundle_registry.json"
+
+
+def load_bundle_registry(registry_path: Path | None = None) -> dict[str, dict[str, Any]]:
+    """Tier 2 번들 매핑 SSOT 로드. Fail-safe — 파일 없음/JSON 결함 시 빈 dict.
+
+    Returns: ``{bundle_name: {"domain": str, "files": [str, ...]}}``.
+    빈 dict 반환은 detect_drift 기존 1:1 흐름과 정합 (회귀 0).
+    """
+    path = registry_path or _default_bundle_registry_path()
+    if not path.exists():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return {}
+    bundles = data.get("bundles", {})
+    return bundles if isinstance(bundles, dict) else {}
+
+
+def _classify_bundle(
+    title: str, registry: dict[str, dict[str, Any]]
+) -> tuple[str | None, list[str]]:
+    """title 이 ``{bundle_name}.md`` 패턴 + registry 매칭 시 (bundle_name, origins) 반환.
+
+    매칭 실패 시 ``(None, [])`` 반환 — 호출자는 기존 1:1 매칭 흐름으로 폴백.
+    """
+    m = _BUNDLE_TITLE_RE.match(title.strip())
+    if not m:
+        return (None, [])
+    bundle_name = m.group("name")
+    entry = registry.get(bundle_name)
+    if not entry or not isinstance(entry, dict):
+        return (None, [])
+    files = entry.get("files")
+    if not isinstance(files, list):
+        return (None, [])
+    return (bundle_name, [str(f) for f in files])
 
 
 def detect_drift(
@@ -215,6 +268,7 @@ def detect_drift(
     *,
     vault_root: Path | None = None,
     relevant_types: tuple[str, ...] = ("generated_text", "pasted_text"),
+    bundle_registry_path: Path | None = None,
 ) -> DriftReport:
     """NLM 노트북의 source 전체를 디스크와 매핑하여 drift 분류.
 
@@ -224,15 +278,20 @@ def detect_drift(
         notebook_id: 점검 대상 노트북 UUID.
         vault_root: 볼트 루트 override (기본은 ``SIRPAN_VAULT`` 또는 hard-coded).
         relevant_types: drift 검사 대상 source type. 외 type은 ``skip_type`` 분류.
+        bundle_registry_path: Tier 2 번들 매핑 SSOT override (기본은 볼트
+            ``030-Configs/시스템환경/nlm_bundle_registry.json``).
 
     Returns:
-        DriftReport — matched/missing/ambiguous/skip_type 분류 + 카운트.
+        DriftReport — matched/matched_bundle/missing/ambiguous/skip_type 분류 + 카운트.
     """
     sources = sources_fetcher(notebook_id)
     matched: list[DriftEntry] = []
+    matched_bundle: list[DriftEntry] = []
     missing: list[DriftEntry] = []
     ambiguous: list[DriftEntry] = []
     skip_type: list[DriftEntry] = []
+
+    bundle_registry = load_bundle_registry(bundle_registry_path)
 
     for s in sources:
         title = (s.get("title") or "").strip()
@@ -249,6 +308,23 @@ def detect_drift(
                     "disk_path": None,
                     "candidates": [],
                     "markdown_relevant": False,
+                }
+            )
+            continue
+
+        # Tier 2 N:1 번들 분기 (Batch 3 ATOM-1) — 기존 1:1 흐름보다 먼저
+        bundle_name, origins = _classify_bundle(title, bundle_registry)
+        if bundle_name is not None:
+            matched_bundle.append(
+                {
+                    "source_id": sid,
+                    "title": title,
+                    "type_name": type_name,
+                    "status": "matched_bundle",
+                    "disk_path": None,
+                    "candidates": [],
+                    "markdown_relevant": True,
+                    "bundle_origins": origins,
                 }
             )
             continue
@@ -305,6 +381,7 @@ def detect_drift(
         "matched": matched,
         "matched_markdown": matched_markdown,
         "matched_non_markdown": matched_non_markdown,
+        "matched_bundle": matched_bundle,
         "missing": missing,
         "ambiguous": ambiguous,
         "skip_type": skip_type,
@@ -319,11 +396,13 @@ def format_drift_summary(report: DriftReport) -> str:
     """
     mm = len(report["matched_markdown"])
     mn = len(report["matched_non_markdown"])
+    mb = len(report.get("matched_bundle", []))
     ms = len(report["missing"])
     a = len(report["ambiguous"])
     st = len(report["skip_type"])
     parts = [
         f"📊 drift 점검: {mm} markdown(.md) / {mn} non-md(plain text 정상)"
+        f" / {mb} 번들(N:1)"
         f" / {ms} NLM 잔재 / {a} 모호 / {st} type-skip"
     ]
     if ms > 0 or a > 0:

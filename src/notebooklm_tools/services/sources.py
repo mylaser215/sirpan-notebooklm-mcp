@@ -1,11 +1,15 @@
 """Sources service — shared validation and logic for source management."""
 
+import subprocess
+import sys
+import tempfile
 import urllib.parse
 from pathlib import Path
 from typing import Any, Literal, TypedDict
 
 from ..core.client import NotebookLMClient
 from .errors import ServiceError, ValidationError
+from .sync_helpers import load_bundle_registry
 
 VALID_SOURCE_TYPES = ("url", "text", "drive", "file")
 VALID_DRIVE_DOC_TYPES = ("doc", "slides", "sheets", "pdf")
@@ -1024,3 +1028,182 @@ def _do_add(
         file_path=str(p),
         title=preserved_title,
     )
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 N:1 번들 동기화 (Batch 3 ATOM-3, 세션368)
+# ---------------------------------------------------------------------------
+
+
+class SyncBundleResult(TypedDict):
+    """Result of sync_bundle: build local N-file bundle + upload as one NLM source."""
+
+    notebook_id: str
+    bundle_name: str
+    source_id: str
+    title: str
+    mode: Literal["add", "replace"]
+    bundled_count: int
+    message: str
+
+
+# scripts/generate_bundle_md.py absolute path (repo-relative; install layout TBD).
+_BUNDLE_TOOL_SCRIPT = (
+    Path(__file__).resolve().parents[3] / "scripts" / "generate_bundle_md.py"
+)
+
+
+def sync_bundle(
+    client: NotebookLMClient,
+    notebook_id: str,
+    bundle_name: str,
+    *,
+    registry_path: Path | None = None,
+    bundle_tool_script: Path | None = None,
+    python_executable: str | None = None,
+) -> SyncBundleResult:
+    """Build a Tier 2 N:1 bundle locally and sync to NLM as one source.
+
+    Reads the bundle definition from ``nlm_bundle_registry.json``, invokes
+    ``scripts/generate_bundle_md.py`` in a temp dir to render the bundle
+    markdown, then either *replaces* the existing ``{bundle_name}.md`` source
+    via :func:`replace_source_file` (``atomic=True``) or *adds* a new one.
+
+    Idempotent — repeated calls converge on the latest origin contents and
+    reuse the existing NLM source_id (subject to delete+add ID rotation in
+    the atomic-replace branch). Fail-close: every recoverable failure
+    (missing registry entry, missing origin files, bundle build error) is
+    raised *before* any destructive NLM call so the previous bundle source
+    (if any) remains intact.
+
+    Args:
+        client: Authenticated NotebookLM client.
+        notebook_id: Notebook UUID hosting the bundle source.
+        bundle_name: Logical bundle name — must match a key under
+            ``bundles`` in ``nlm_bundle_registry.json``.
+        registry_path: Optional override for the bundle registry JSON.
+        bundle_tool_script: Optional override for the bundle builder script
+            path (test seam — defaults to the repo-relative path).
+        python_executable: Optional override for the Python used to invoke
+            the builder (test seam — defaults to ``sys.executable``).
+
+    Returns:
+        SyncBundleResult with mode ``"add"`` or ``"replace"`` and the
+        resulting source_id / title.
+
+    Raises:
+        ValidationError: bundle name unknown, files list empty, or any
+            origin file missing on disk (all surfaced *before* the
+            NLM call).
+        ServiceError: bundle builder failed, bundle tool missing, or the
+            NLM add/replace failed.
+    """
+    # 1. Registry lookup
+    registry = load_bundle_registry(registry_path)
+    bundle = registry.get(bundle_name)
+    if not bundle or not isinstance(bundle, dict):
+        raise ValidationError(
+            f"Bundle '{bundle_name}' not registered",
+            user_message=f"Unknown bundle: {bundle_name}",
+            hint="Add the bundle under `bundles` in nlm_bundle_registry.json",
+        )
+    files = bundle.get("files")
+    if not isinstance(files, list) or not files:
+        raise ValidationError(
+            f"Bundle '{bundle_name}' has empty file list",
+            user_message=f"Bundle '{bundle_name}' has no files",
+        )
+
+    # 2. Pre-flight origin existence (fail-close before NLM is touched)
+    abs_files = [Path(f).resolve() for f in files]
+    missing_origins = [str(p) for p in abs_files if not p.exists()]
+    if missing_origins:
+        raise ValidationError(
+            f"Bundle '{bundle_name}' has missing origins: {missing_origins}",
+            user_message=(
+                f"Bundle '{bundle_name}' references files that no longer exist on disk."
+            ),
+            hint=f"First missing: {missing_origins[0]}",
+        )
+
+    # 3. Bundle build (temp dir; auto-cleanup on exit)
+    script = bundle_tool_script or _BUNDLE_TOOL_SCRIPT
+    if not script.exists():
+        raise ServiceError(
+            f"Bundle tool not found at {script}",
+            user_message="Bundle generator script missing.",
+            hint="Verify the sirpan-notebooklm-mcp repo layout (scripts/generate_bundle_md.py).",
+        )
+    py = python_executable or sys.executable
+    title = f"{bundle_name}.md"
+
+    with tempfile.TemporaryDirectory(prefix="nlm-sync-bundle-") as tmpdir:
+        bundle_path = Path(tmpdir) / title
+        cmd = [
+            py,
+            str(script),
+            "--files",
+            *[str(p) for p in abs_files],
+            "--output",
+            str(bundle_path),
+            "--bundle-name",
+            bundle_name,
+        ]
+        proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
+        if proc.returncode != 0:
+            raise ServiceError(
+                f"Bundle build failed (exit {proc.returncode}): {proc.stderr.strip()}",
+                user_message="Bundle generation failed; original NLM source unchanged.",
+            )
+
+        # 4. Lookup existing bundle source by title (best-effort)
+        existing_id: str | None = None
+        try:
+            for src in client.get_notebook_sources_with_types(notebook_id):
+                if src.get("title") == title:
+                    existing_id = src.get("id") if isinstance(src.get("id"), str) else None
+                    break
+        except Exception:
+            pass  # treat as "no existing source"; add path is taken below
+
+        # 5. Replace (atomic) or add
+        if existing_id:
+            replace_res = replace_source_file(
+                client,
+                notebook_id,
+                existing_id,
+                str(bundle_path),
+                atomic=True,
+            )
+            return {
+                "notebook_id": notebook_id,
+                "bundle_name": bundle_name,
+                "source_id": replace_res["new_source_id"],
+                "title": replace_res["title"],
+                "mode": "replace",
+                "bundled_count": len(abs_files),
+                "message": (
+                    f"Replaced bundle '{bundle_name}' ({len(abs_files)} files) "
+                    f"as source {replace_res['new_source_id']}"
+                ),
+            }
+
+        add_res = add_source(
+            client,
+            notebook_id,
+            "file",
+            file_path=str(bundle_path),
+            title=title,
+        )
+        return {
+            "notebook_id": notebook_id,
+            "bundle_name": bundle_name,
+            "source_id": add_res["source_id"],
+            "title": add_res["title"],
+            "mode": "add",
+            "bundled_count": len(abs_files),
+            "message": (
+                f"Added bundle '{bundle_name}' ({len(abs_files)} files) "
+                f"as new source {add_res['source_id']}"
+            ),
+        }

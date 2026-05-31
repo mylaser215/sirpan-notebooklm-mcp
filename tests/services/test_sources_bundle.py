@@ -1,0 +1,225 @@
+"""Regression guards for services.sources.sync_bundle (Batch 3 ATOM-3, 세션368).
+
+Mocks the NLM client + the bundle builder script so tests are network-free
+and OS-temp-safe. Covers add/replace dispatch, registry lookup, and
+fail-close pre-flight checks.
+"""
+
+from __future__ import annotations
+
+import json
+import sys
+from pathlib import Path
+from unittest.mock import MagicMock
+
+import pytest
+
+from notebooklm_tools.services import sources as sources_service
+from notebooklm_tools.services.errors import ServiceError, ValidationError
+from notebooklm_tools.services.sources import sync_bundle
+
+
+@pytest.fixture
+def mock_client() -> MagicMock:
+    return MagicMock()
+
+
+@pytest.fixture
+def origin_files(tmp_path: Path) -> list[Path]:
+    """Three minimal origin files for a fake bundle."""
+    a = tmp_path / "origin_a.md"
+    b = tmp_path / "origin_b.py"
+    a.write_text("# A\n", encoding="utf-8")
+    b.write_text("x = 1\n", encoding="utf-8")
+    return [a, b]
+
+
+@pytest.fixture
+def registry_path(tmp_path: Path, origin_files: list[Path]) -> Path:
+    """Bundle registry referencing the origin files above."""
+    reg = tmp_path / "bundle_registry.json"
+    reg.write_text(
+        json.dumps(
+            {
+                "_version": "1.0",
+                "bundles": {
+                    "Test_Bundle": {
+                        "domain": "test",
+                        "files": [str(p) for p in origin_files],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return reg
+
+
+def _bundle_tool_script() -> Path:
+    """Resolve the real generator script for E2E builder invocation."""
+    return Path(__file__).resolve().parents[2] / "scripts" / "generate_bundle_md.py"
+
+
+# ---------------------------------------------------------------------------
+# Happy paths
+# ---------------------------------------------------------------------------
+
+def test_sync_bundle_add_new(
+    mock_client: MagicMock, registry_path: Path
+) -> None:
+    """No matching source in NLM → add_source path; mode == 'add'."""
+    mock_client.get_notebook_sources_with_types.return_value = [
+        {"id": "other-id", "title": "Other.md", "source_type_name": "generated_text"},
+    ]
+    mock_client.add_file.return_value = {"id": "new-bundle-id", "title": "Test_Bundle.md"}
+
+    result = sync_bundle(
+        mock_client,
+        "nb1",
+        "Test_Bundle",
+        registry_path=registry_path,
+        bundle_tool_script=_bundle_tool_script(),
+        python_executable=sys.executable,
+    )
+
+    assert result["mode"] == "add"
+    assert result["bundle_name"] == "Test_Bundle"
+    assert result["source_id"] == "new-bundle-id"
+    assert result["bundled_count"] == 2
+    mock_client.add_file.assert_called_once()
+    mock_client.delete_source.assert_not_called()
+
+
+def test_sync_bundle_replace_existing(
+    mock_client: MagicMock, registry_path: Path
+) -> None:
+    """Matching title in NLM → replace_source_file(atomic=True); mode == 'replace'."""
+    mock_client.get_notebook_sources_with_types.return_value = [
+        {"id": "old-bundle-id", "title": "Test_Bundle.md", "source_type_name": "generated_text"},
+    ]
+    # atomic replace = ADD-first then DELETE; mock both.
+    mock_client.add_file.return_value = {"id": "new-bundle-id", "title": "Test_Bundle.md"}
+    mock_client.delete_source.return_value = True
+    mock_client.list_notes.return_value = []  # _resolve_source_type fallback
+
+    result = sync_bundle(
+        mock_client,
+        "nb1",
+        "Test_Bundle",
+        registry_path=registry_path,
+        bundle_tool_script=_bundle_tool_script(),
+        python_executable=sys.executable,
+    )
+
+    assert result["mode"] == "replace"
+    assert result["source_id"] == "new-bundle-id"
+    assert result["bundled_count"] == 2
+    mock_client.add_file.assert_called_once()
+    mock_client.delete_source.assert_called_once()
+
+
+# ---------------------------------------------------------------------------
+# Fail-close: pre-flight validation
+# ---------------------------------------------------------------------------
+
+def test_sync_bundle_unknown_name(
+    mock_client: MagicMock, registry_path: Path
+) -> None:
+    """Unregistered bundle name → ValidationError; no NLM call made."""
+    with pytest.raises(ValidationError) as excinfo:
+        sync_bundle(
+            mock_client,
+            "nb1",
+            "Ghost_Bundle",
+            registry_path=registry_path,
+            bundle_tool_script=_bundle_tool_script(),
+        )
+    assert "not registered" in str(excinfo.value).lower()
+    mock_client.add_file.assert_not_called()
+    mock_client.delete_source.assert_not_called()
+
+
+def test_sync_bundle_missing_origin_file(
+    mock_client: MagicMock, tmp_path: Path
+) -> None:
+    """Origin file gone from disk → ValidationError before any NLM call."""
+    reg = tmp_path / "reg.json"
+    reg.write_text(
+        json.dumps(
+            {
+                "_version": "1.0",
+                "bundles": {
+                    "Ghost_Bundle": {
+                        "domain": "test",
+                        "files": [str(tmp_path / "does_not_exist.md")],
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValidationError) as excinfo:
+        sync_bundle(
+            mock_client,
+            "nb1",
+            "Ghost_Bundle",
+            registry_path=reg,
+            bundle_tool_script=_bundle_tool_script(),
+        )
+    assert "missing" in str(excinfo.value).lower()
+    mock_client.add_file.assert_not_called()
+
+
+def test_sync_bundle_empty_files_list(
+    mock_client: MagicMock, tmp_path: Path
+) -> None:
+    """Bundle entry has empty files list → ValidationError."""
+    reg = tmp_path / "reg.json"
+    reg.write_text(
+        json.dumps(
+            {
+                "_version": "1.0",
+                "bundles": {"Empty_Bundle": {"domain": "test", "files": []}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValidationError):
+        sync_bundle(
+            mock_client,
+            "nb1",
+            "Empty_Bundle",
+            registry_path=reg,
+            bundle_tool_script=_bundle_tool_script(),
+        )
+    mock_client.add_file.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Bundle tool missing
+# ---------------------------------------------------------------------------
+
+def test_sync_bundle_tool_script_missing(
+    mock_client: MagicMock, registry_path: Path, tmp_path: Path
+) -> None:
+    """Builder script path doesn't exist → ServiceError; NLM not touched."""
+    with pytest.raises(ServiceError) as excinfo:
+        sync_bundle(
+            mock_client,
+            "nb1",
+            "Test_Bundle",
+            registry_path=registry_path,
+            bundle_tool_script=tmp_path / "no_such_tool.py",
+        )
+    assert "not found" in str(excinfo.value).lower()
+    mock_client.add_file.assert_not_called()
+
+
+# ---------------------------------------------------------------------------
+# Smoke: service exposes the symbol (catches name-collision regressions)
+# ---------------------------------------------------------------------------
+
+def test_sync_bundle_exported() -> None:
+    """sync_bundle is importable from the sources service module."""
+    assert hasattr(sources_service, "sync_bundle")
+    assert callable(sources_service.sync_bundle)

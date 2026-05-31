@@ -352,3 +352,36 @@ def source_get_content(source_id: str, notebook_id: str | None = None) -> Result
         return error_result(e.user_message, hint=e.hint, detail=str(e))
     except Exception as e:
         return error_result(str(e))
+
+
+@logged_tool()
+def sync_bundle(
+    notebook_id: str,
+    bundle_name: str,
+) -> ResultDict:
+    """Sync a Tier 2 N:1 bundle: build locally + upload as one NLM source.
+
+    Reads the bundle definition from `nlm_bundle_registry.json`
+    (`030-Configs/시스템환경/`), renders an `{bundle_name}.md` markdown
+    artifact in a temp dir, and either *replaces* the existing same-title
+    source via atomic replace or *adds* a new one.
+
+    Idempotent — call repeatedly; converges on the latest origin contents.
+
+    Args:
+        notebook_id: Notebook UUID where the bundle source lives.
+        bundle_name: Bundle key registered in nlm_bundle_registry.json.
+
+    Returns: notebook_id, bundle_name, source_id, title, mode ("add"|"replace"),
+        bundled_count (int), message (str).
+    """
+    try:
+        client = get_client()
+        result = sources_service.sync_bundle(client, notebook_id, bundle_name)
+        return {"status": "success", **result}
+    except ValidationError as e:
+        return error_result(str(e))
+    except ServiceError as e:
+        return error_result(e.user_message, hint=e.hint, detail=str(e))
+    except Exception as e:
+        return error_result(str(e))

@@ -15,8 +15,10 @@ from typing import Any
 import pytest
 
 from notebooklm_tools.services.sync_helpers import (
+    _classify_bundle,
     detect_drift,
     format_drift_summary,
+    load_bundle_registry,
 )
 
 
@@ -318,3 +320,97 @@ def test_detect_drift_v7_real_residual_cases(tmp_path: Path) -> None:
     # extract_filename 결함으로 glob 0건 → missing (호환 매핑 실제 발동 X)
     assert len(report_kr["missing"]) == 1
     assert len(report_kr["matched"]) == 0
+
+
+# ---------------------------------------------------------------------------
+# Tier 2 N:1 번들 회귀 가드 (Batch 3 ATOM-1, 세션368)
+# ---------------------------------------------------------------------------
+
+
+def _write_bundle_registry(path: Path, bundles: dict) -> Path:
+    """Helper — write a minimal bundle registry JSON for tests."""
+    payload = {
+        "_comment": "test fixture",
+        "_version": "1.0",
+        "bundles": bundles,
+    }
+    import json as _json
+    path.write_text(_json.dumps(payload), encoding="utf-8")
+    return path
+
+
+def test_load_bundle_registry_fail_safe(tmp_path: Path) -> None:
+    """Registry 파일 부재 → 빈 dict (Fail-safe). 예외 0."""
+    nonexistent = tmp_path / "missing_registry.json"
+    assert load_bundle_registry(nonexistent) == {}
+
+
+def test_classify_bundle_matched(tmp_path: Path) -> None:
+    """Registry 매칭 시 (bundle_name, origins) 반환."""
+    reg_path = _write_bundle_registry(
+        tmp_path / "reg.json",
+        {
+            "Utils_Bundle": {
+                "domain": "test",
+                "files": ["/abs/a.md", "/abs/b.py"],
+            }
+        },
+    )
+    registry = load_bundle_registry(reg_path)
+    name, origins = _classify_bundle("Utils_Bundle.md", registry)
+    assert name == "Utils_Bundle"
+    assert origins == ["/abs/a.md", "/abs/b.py"]
+
+
+def test_classify_bundle_not_registered(tmp_path: Path) -> None:
+    """`*_Bundle.md` 형식이지만 registry 미등록 → (None, [])."""
+    reg_path = _write_bundle_registry(tmp_path / "reg.json", {})
+    registry = load_bundle_registry(reg_path)
+    name, origins = _classify_bundle("Ghost_Bundle.md", registry)
+    assert name is None
+    assert origins == []
+
+
+def test_detect_drift_classifies_bundle(tmp_path: Path) -> None:
+    """Bundle source → matched_bundle, 기존 matched/missing 비건드림."""
+    reg_path = _write_bundle_registry(
+        tmp_path / "reg.json",
+        {
+            "Utils_Bundle": {
+                "domain": "test",
+                "files": ["/abs/a.md", "/abs/b.py"],
+            }
+        },
+    )
+    fetcher = _make_fetcher([
+        {"id": "bd", "title": "Utils_Bundle.md", "source_type_name": "generated_text"},
+    ])
+    report = detect_drift(
+        fetcher, "nb1", vault_root=tmp_path, bundle_registry_path=reg_path
+    )
+
+    assert len(report["matched_bundle"]) == 1
+    entry = report["matched_bundle"][0]
+    assert entry["status"] == "matched_bundle"
+    assert entry["source_id"] == "bd"
+    assert entry["bundle_origins"] == ["/abs/a.md", "/abs/b.py"]
+    assert entry["markdown_relevant"] is True
+    # 기존 카테고리는 비어있어야 (회귀 격리)
+    assert len(report["matched"]) == 0
+    assert len(report["missing"]) == 0
+
+
+def test_format_drift_summary_with_bundles(tmp_path: Path) -> None:
+    """Summary 1줄에 번들(N:1) 카운트 포함."""
+    reg_path = _write_bundle_registry(
+        tmp_path / "reg.json",
+        {"Utils_Bundle": {"domain": "test", "files": ["/abs/a.md"]}},
+    )
+    fetcher = _make_fetcher([
+        {"id": "bd", "title": "Utils_Bundle.md", "source_type_name": "generated_text"},
+    ])
+    report = detect_drift(
+        fetcher, "nb1", vault_root=tmp_path, bundle_registry_path=reg_path
+    )
+    summary = format_drift_summary(report)
+    assert "1 번들(N:1)" in summary
