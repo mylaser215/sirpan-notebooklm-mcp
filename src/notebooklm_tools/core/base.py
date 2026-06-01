@@ -15,6 +15,7 @@ import os
 import random
 import re
 import threading
+import time
 import urllib.parse
 from typing import Any
 
@@ -49,6 +50,11 @@ else:
 # Timeout configuration (seconds)
 DEFAULT_TIMEOUT = 30.0  # Default for most operations
 SOURCE_ADD_TIMEOUT = 120.0  # Extended timeout for all source operations
+
+# Layer 3 백그라운드 headless auth 데드락 방지 타임아웃 (세션56 Q4 ●●● 권고).
+# future가 시작 후 이 시간 초과 시 강제 None 리셋 + 새 시도 — 좀비 chrome 등으로
+# future가 영원히 done() 안 되는 영구 잠금 차단. NLM 자문 conv 21df4678.
+HEADLESS_AUTH_DEADLOCK_TIMEOUT_SEC = 60.0
 
 
 class BaseClient:
@@ -320,6 +326,8 @@ class BaseClient:
         # Background headless auth (Layer 3 non-blocking)
         self._headless_auth_future: concurrent.futures.Future | None = None
         self._headless_auth_lock = threading.Lock()
+        # 세션56 Q4 ●●● — 데드락 방지 타임스탬프 (좀비 future 강제 리셋용)
+        self._headless_auth_started_at: float | None = None
 
         # Only refresh CSRF token if not provided - tokens actually last hours/days, not minutes
         # The retry logic in _call_rpc() handles expired tokens gracefully
@@ -880,18 +888,40 @@ class BaseClient:
                             self.csrf_token = tokens.csrf_token
                             self._session_id = tokens.session_id
                         self._headless_auth_future = None
+                        self._headless_auth_started_at = None
                         return True
                     else:
                         self._headless_auth_future = None
+                        self._headless_auth_started_at = None
                         return False
                 except Exception as e:
                     logger.debug(f"Background headless auth failed: {e}")
                     self._headless_auth_future = None
+                    self._headless_auth_started_at = None
                     return False
 
-            # If already in progress, tell caller to wait
+            # 세션56 Q4 ●●● — Layer 3 데드락 방지: future가 not None인데
+            # done()도 아니고 시작 후 HEADLESS_AUTH_DEADLOCK_TIMEOUT_SEC 초과 시
+            # 좀비 chrome 등 가능성으로 보고 강제 리셋 → 새 시도. 영원히
+            # AuthRecoveryInProgress만 반환되는 영구 잠금 차단.
             if self._headless_auth_future is not None:
-                raise AuthRecoveryInProgress()
+                started_at = self._headless_auth_started_at
+                if (
+                    started_at is not None
+                    and (time.time() - started_at) > HEADLESS_AUTH_DEADLOCK_TIMEOUT_SEC
+                ):
+                    elapsed = time.time() - started_at
+                    logger.warning(
+                        f"Layer 3 headless auth deadlock detected "
+                        f"(no response for {elapsed:.0f}s, threshold "
+                        f"{HEADLESS_AUTH_DEADLOCK_TIMEOUT_SEC}s). "
+                        "Force-resetting future and retrying."
+                    )
+                    self._headless_auth_future = None
+                    self._headless_auth_started_at = None
+                    # fallthrough to kick off new headless auth below
+                else:
+                    raise AuthRecoveryInProgress()
 
             # Kick off headless auth in background
             try:
@@ -903,6 +933,7 @@ class BaseClient:
                     max_workers=1, thread_name_prefix="nlm-headless-auth",
                 )
                 self._headless_auth_future = executor.submit(run_headless_auth)
+                self._headless_auth_started_at = time.time()
                 executor.shutdown(wait=False)  # Don't block; let thread run
                 raise AuthRecoveryInProgress()
             except AuthRecoveryInProgress:
