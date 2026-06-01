@@ -16,6 +16,7 @@ HTTP resumable upload implementation adapted from notebooklm-py.
 """
 
 import logging
+import os
 import shutil
 import tempfile
 import textwrap
@@ -33,6 +34,15 @@ from .exceptions import FileUploadError, FileValidationError
 from .retry import execute_with_retry
 
 logger = logging.getLogger(__name__)
+
+# 배치3 ATOM-5 (upstream 31df628 + 세션342 ADR 융합).
+# RPC code 3/9 false-negative 폴링 시 노트북 source 개수가 이 임계치 이상이면
+# polling 자체를 스킵 — NLM Pro 한도(~300) 초과 상태에서 매번 ~7초 지연을 막기 위함.
+# 세션342 incident: code 3 INVALID_ARGUMENT가 *일시 서버 오류*가 아닌 *한도 초과
+# 모호 에러*로 반환되는 경우가 있음 → 한도 임계 노트북에서는 reconcile이 영원히
+# false negative 보고 → Fail-fast.
+# 운영 오버라이드: `NOTEBOOKLM_SOURCE_LIMIT_GUARD` 환경변수 (정수, default 290).
+SOURCE_LIMIT_GUARD = int(os.environ.get("NOTEBOOKLM_SOURCE_LIMIT_GUARD", "290"))
 
 # Maps raw source extensions to GitHub-flavored markdown fence languages used
 # by ``add_file(auto_wrap_to_md=True)``. Unmapped extensions fall back to a
@@ -464,6 +474,62 @@ class SourceMixin(BaseClient):
 
         return sources
 
+    def _reconcile_source(
+        self,
+        notebook_id: str,
+        match_fn,
+        poll_attempts: int = 3,
+        poll_delay: float = 1.0,
+    ) -> dict[str, Any] | None:
+        """RPC code 3/9 false-negative 폴링 해소 (배치3 ATOM-5).
+
+        upstream 31df628 동형 + 세션342 ADR 가드 융합. NLM이 'accepted-pending'과
+        'genuine rejection'을 동일 envelope으로 응답하므로 source 목록을 폴링하여
+        실제 등록 여부를 사후 검증한다.
+
+        Args:
+            notebook_id: 대상 노트북
+            match_fn: source dict을 받아 매칭 여부를 bool로 반환하는 콜백
+                (예: lambda s, t=title: s.get("title","").strip() == t.strip())
+            poll_attempts: 최대 폴링 횟수 (default 3)
+            poll_delay: 초기 백오프 (default 1.0s, 이후 exp 2x — 1→2→4)
+
+        Returns:
+            매칭된 source dict 또는 None (genuine rejection / 한도 가드 hit)
+
+        세션342 가드: 첫 polling에서 source 개수가 SOURCE_LIMIT_GUARD 이상이면
+        polling 루프 자체를 스킵 — 한도 초과 노트북에서 매번 7s+ 지연 안티패턴
+        차단. code 3 = NLM Pro 한도 초과 모호 에러 가능성 시 Fail-fast 정공.
+        """
+        # 1차 즉시 매칭 + 한도 진단용
+        try:
+            sources = self.get_notebook_sources_with_types(notebook_id)
+        except Exception:
+            sources = []
+        for src in sources:
+            if match_fn(src):
+                return src
+        # 세션342 가드: 한도 임계 노트북은 polling 스킵
+        if len(sources) >= SOURCE_LIMIT_GUARD:
+            logger.warning(
+                "Source limit guard hit (%d >= %d): skipping reconcile poll for notebook %s",
+                len(sources),
+                SOURCE_LIMIT_GUARD,
+                notebook_id,
+            )
+            return None
+        # Exp backoff polling (1 → 2 → 4 캡)
+        for attempt in range(1, poll_attempts):
+            time.sleep(min(poll_delay * (2 ** (attempt - 1)), 4.0))
+            try:
+                sources = self.get_notebook_sources_with_types(notebook_id)
+            except Exception:
+                continue
+            for src in sources:
+                if match_fn(src):
+                    return src
+        return None
+
     def add_url_source(
         self,
         notebook_id: str,
@@ -505,7 +571,30 @@ class SourceMixin(BaseClient):
                             self._source_rpc_version = "v1"
                 except RPCError as e:
                     if e.error_code == 3:
-                        # Legacy RPC rejected — try the new endpoint
+                        # 배치3 ATOM-5: v2 fallback 이전에 false-negative reconcile
+                        # 시도. v1이 accepted-pending이었으면 source가 이미 등록됐을
+                        # 가능성 → v2 호출 시 중복 submission 차단.
+                        normalized_url = url.rstrip("/")
+                        reconciled = self._reconcile_source(
+                            notebook_id,
+                            match_fn=lambda s, u=normalized_url: (
+                                str(s.get("url") or "").rstrip("/") == u
+                            ),
+                        )
+                        if reconciled:
+                            with self._state_lock:
+                                if self._source_rpc_version is None:
+                                    self._source_rpc_version = "v1"
+                            source_result = {
+                                "id": reconciled["id"],
+                                "title": reconciled.get("title", ""),
+                            }
+                            if wait and isinstance(source_result.get("id"), str):
+                                return self.wait_for_source_ready(
+                                    notebook_id, source_result["id"], wait_timeout
+                                )
+                            return source_result
+                        # genuine reject → v2 fallback (기존 흐름)
                         result = self._add_url_source_v2(notebook_id, url, source_path)
                         with self._state_lock:
                             if self._source_rpc_version is None:
@@ -763,6 +852,28 @@ class SourceMixin(BaseClient):
                 if e.error_code == 9 and text_payload != normalized_text:
                     time.sleep(0.25)
                     continue
+                if e.error_code in (3, 9):
+                    # 배치3 ATOM-5: false-negative reconcile.
+                    # NLM이 accepted-pending과 genuine reject를 동일 envelope으로
+                    # 응답 → source 목록 폴링으로 실 등록 여부 검증.
+                    # 한계: 기존 동명 title이 있으면 가짜 매칭 가능성 (upstream
+                    # 한계 그대로 수용 + 회귀 가드 #13에 명시).
+                    reconciled = self._reconcile_source(
+                        notebook_id,
+                        match_fn=lambda s, t=title: (
+                            s.get("title", "").strip() == t.strip()
+                        ),
+                    )
+                    if reconciled:
+                        source_result = {
+                            "id": reconciled["id"],
+                            "title": reconciled.get("title", title),
+                        }
+                        if wait and isinstance(source_result.get("id"), str):
+                            return self.wait_for_source_ready(
+                                notebook_id, source_result["id"], wait_timeout
+                            )
+                        return source_result
                 raise
 
         source_result = None
@@ -830,6 +941,25 @@ class SourceMixin(BaseClient):
                 "status": "timeout",
                 "message": f"Operation timed out after {SOURCE_ADD_TIMEOUT}s.",
             }
+        except RPCError as e:
+            if e.error_code in (3, 9):
+                # 배치3 ATOM-5: false-negative reconcile (drive_doc_id 매칭).
+                # NLM이 accepted-pending과 genuine reject를 동일 envelope으로 응답.
+                reconciled = self._reconcile_source(
+                    notebook_id,
+                    match_fn=lambda s, did=document_id: s.get("drive_doc_id") == did,
+                )
+                if reconciled:
+                    source_result = {
+                        "id": reconciled["id"],
+                        "title": reconciled.get("title", title),
+                    }
+                    if wait and isinstance(source_result.get("id"), str):
+                        return self.wait_for_source_ready(
+                            notebook_id, source_result["id"], wait_timeout
+                        )
+                    return source_result
+            raise
 
         source_result = None
         if result and isinstance(result, list) and len(result) > 0:

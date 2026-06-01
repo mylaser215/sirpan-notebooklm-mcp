@@ -5,8 +5,15 @@ This module provides the ResearchMixin class which handles all research
 operations (web search, Drive search, and source discovery).
 """
 
+import logging
+import time
+
 from . import constants
 from .base import BaseClient
+from .errors import RPCError
+from .sources import SOURCE_LIMIT_GUARD
+
+logger = logging.getLogger(__name__)
 
 
 class ResearchMixin(BaseClient):
@@ -458,11 +465,52 @@ class ResearchMixin(BaseClient):
         # Slot 0: research-mode config envelope. Captured 260523 from real NLM
         # browser client for a Deep Research import. Matches the inner shape
         # NLM sends with start_research; previous None caused import to drop.
+        # 세션46 LBwxtb slot 0 envelope — 절대 변경 금지 (배치3 회귀 가드 #17).
         slot_0 = [2, None, None, [1, None, None, None, None, None, None, None, None, None, [1]]]
         params = [slot_0, [1], task_id, notebook_id, source_array]
-        result = self._call_rpc(
-            self.RPC_IMPORT_RESEARCH, params, f"/notebook/{notebook_id}", timeout=timeout
-        )
+
+        # 배치3 ATOM-5 (upstream 31df628): false-negative reconcile pre-snapshot.
+        # NLM이 code 3/9를 accepted-pending / genuine reject 구분 없이 응답 → 사후
+        # 폴링으로 신규 source 감지. 세션342 가드: 한도 임계 노트북은 reconcile 스킵.
+        pre_sources: list = []
+        pre_ids: set = set()
+        try:
+            pre_sources = self.get_notebook_sources_with_types(notebook_id)  # type: ignore[attr-defined]
+            pre_ids = {s["id"] for s in pre_sources if s.get("id")}
+        except Exception:
+            pass
+
+        try:
+            result = self._call_rpc(
+                self.RPC_IMPORT_RESEARCH, params, f"/notebook/{notebook_id}", timeout=timeout
+            )
+        except RPCError as e:
+            if e.error_code not in (3, 9):
+                raise
+            # 세션342 가드: NLM Pro 한도 임계 노트북 reconcile 스킵
+            if len(pre_sources) >= SOURCE_LIMIT_GUARD:
+                logger.warning(
+                    "Source limit guard hit (%d >= %d) for research import: skipping reconcile",
+                    len(pre_sources),
+                    SOURCE_LIMIT_GUARD,
+                )
+                raise
+            # Exp backoff polling — 신규 source 검출
+            for attempt in range(3):
+                time.sleep(min(1.5 * (2 ** attempt), 6.0))
+                try:
+                    post_sources = self.get_notebook_sources_with_types(notebook_id)  # type: ignore[attr-defined]
+                except Exception:
+                    continue
+                new_sources = [
+                    s for s in post_sources if s.get("id") and s["id"] not in pre_ids
+                ]
+                if new_sources:
+                    return [
+                        {"id": s["id"], "title": s.get("title", "Untitled")}
+                        for s in new_sources
+                    ]
+            raise
 
         imported_sources = []
         if result and isinstance(result, list):
