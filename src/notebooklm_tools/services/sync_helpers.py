@@ -59,6 +59,7 @@ NLM_SEED_SKILL_KEYWORDS: dict[str, str] = {
 
 _VERSION_SUFFIX_RE = re.compile(r"_v\d+(?:\.\d+)*(?=\.\w+$)")
 _KNOWN_EXTS: tuple[str, ...] = (".md", ".py", ".json", ".tsx", ".ts", ".js", ".txt")
+_PROCESSED_TAIL_RE = re.compile(r"\.(py|ts|tsx|json|js|yaml|yml|toml)\.md$")
 
 
 def extract_filename(title: str) -> str:
@@ -174,6 +175,14 @@ def find_disk_path(title: str, *, vault_root: Path | None = None) -> list[Path]:
     if not matches:
         if not fname.lower().endswith(".md"):
             matches = _glob_vault(f"{fname}.md", root)
+            if matches:
+                return _narrow_by_priority(matches, root)
+        # 신설: auto_wrap_to_md / generate_code_md.py 가공 꼬리 (.json.md → .json)
+        if _PROCESSED_TAIL_RE.search(fname):
+            raw = _PROCESSED_TAIL_RE.sub(
+                lambda m: f".{m.group(1)}", fname
+            )
+            matches = _glob_vault(raw, root)
             if matches:
                 return _narrow_by_priority(matches, root)
         if "." not in fname:

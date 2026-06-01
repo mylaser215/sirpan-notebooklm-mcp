@@ -414,3 +414,58 @@ def test_format_drift_summary_with_bundles(tmp_path: Path) -> None:
     )
     summary = format_drift_summary(report)
     assert "1 번들(N:1)" in summary
+
+
+# ---------------------------------------------------------------------------
+# 가공 꼬리 fallback (결함 1 박제 — auto_wrap_to_md / generate_code_md.py 산출물)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def vault_with_processed_tail_files(tmp_path: Path) -> Path:
+    """가공 꼬리 산출물 케이스 — raw 원본만 디스크 존재 (NLM title은 .json.md/.py.md)."""
+    (tmp_path / "030-Configs" / "시스템환경").mkdir(parents=True)
+    (tmp_path / "030-Configs" / "시스템환경" / "nlm_bundle_registry.json").write_text(
+        "{}", encoding="utf-8"
+    )
+    (tmp_path / "060-Automations").mkdir()
+    (tmp_path / "060-Automations" / "vault_cron.py").write_text(
+        "# stub", encoding="utf-8"
+    )
+    return tmp_path
+
+
+def test_detect_drift_processed_tail_json_md(
+    vault_with_processed_tail_files: Path,
+) -> None:
+    """auto_wrap_to_md 산출물 .json.md → raw .json fallback matched (결함 1 박제)."""
+    fetcher = _make_fetcher([
+        {
+            "id": "a700bfe0",
+            "title": "nlm_bundle_registry.json.md",
+            "source_type_name": "generated_text",
+        }
+    ])
+    report = detect_drift(fetcher, "nb1", vault_root=vault_with_processed_tail_files)
+    assert len(report["matched"]) == 1
+    assert len(report["missing"]) == 0
+    assert report["matched"][0]["disk_path"].endswith("nlm_bundle_registry.json")
+    assert report["matched"][0]["markdown_relevant"] is False  # raw .json
+
+
+def test_detect_drift_processed_tail_py_md(
+    vault_with_processed_tail_files: Path,
+) -> None:
+    """generate_code_md.py 산출물 .py.md → raw .py fallback matched."""
+    fetcher = _make_fetcher([
+        {
+            "id": "dc9135cd",
+            "title": "vault_cron.py.md",
+            "source_type_name": "generated_text",
+        }
+    ])
+    report = detect_drift(fetcher, "nb1", vault_root=vault_with_processed_tail_files)
+    assert len(report["matched"]) == 1
+    assert len(report["missing"]) == 0
+    assert report["matched"][0]["disk_path"].endswith("vault_cron.py")
+    assert report["matched"][0]["markdown_relevant"] is False  # raw .py
