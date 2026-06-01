@@ -10,6 +10,7 @@ Usage:
 """
 
 import json
+import os
 import platform
 import re
 import shutil
@@ -160,11 +161,17 @@ def _read_port_map() -> dict[str, dict]:
 
 
 def _save_port_map(data: dict[str, dict]) -> None:
-    """Write port map to disk."""
+    """Write port map to disk with restrictive permissions from creation (배치2 ATOM-1)."""
     map_file = _get_port_map_file()
-    try:  # noqa: SIM105
-        map_file.write_text(json.dumps(data, indent=2))
-        map_file.chmod(0o600)
+    try:
+        fd = os.open(str(map_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            f = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            os.close(fd)
+            raise
+        with f:
+            json.dump(data, f, indent=2)
     except OSError:
         pass  # Best-effort
 
@@ -580,10 +587,14 @@ def terminate_chrome(process: subprocess.Popen | None = None, port: int | None =
         return False
 
     # Attempt graceful shutdown via CDP to prevent "Restore Pages" warnings on next launch
+    # 배치2 ATOM-1 (upstream f2fb921): null-safety — double-call 시
+    # _cached_ws가 None이면 AttributeError 발생 가능. ref를 try 진입 전 캡쳐.
+    ws_to_close = _cached_ws
     try:
         if port or _cached_ws_url:
             execute_cdp_command(_cached_ws_url or get_debugger_url(_chrome_port), "Browser.close")
-            _cached_ws.close()
+            if ws_to_close:
+                ws_to_close.close()
         else:
             # No fast path, use slow path
             process.terminate()

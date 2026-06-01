@@ -328,7 +328,10 @@ class ConversationMixin(BaseClient):
             "references": citation_data.get("references", []),
             "turn_number": turn_number,
             "is_follow_up": not is_new_conversation,
-            "raw_response": response.text[:1000] if response.text else "",
+            # 배치2 ATOM-2 (upstream cecd757): 세션 데이터 노출 차단.
+            # raw response 텍스트에 NLM 백엔드 응답이 포함되어 호출자에게 누출
+            # 가능성 → 빈 문자열로 비움. reader 0건 grep 확인.
+            "raw_response": "",
         }
 
     def _extract_source_ids_from_notebook(self, notebook_data: Any) -> list[str]:

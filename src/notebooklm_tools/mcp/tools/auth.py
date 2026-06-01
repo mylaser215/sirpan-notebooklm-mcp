@@ -130,7 +130,8 @@ def save_auth_tokens(
         for part in cookies.split("; "):
             if "=" in part:
                 key, value = part.split("=", 1)
-                all_cookies[key] = value
+                # 배치2 ATOM-1 (upstream f2fb921): cookie 헤더 앞뒤 공백 처리
+                all_cookies[key.strip()] = value
 
         # Validate required cookies
         required = ["SID", "HSID", "SSID", "APISID", "SAPISID"]

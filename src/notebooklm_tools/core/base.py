@@ -25,8 +25,8 @@ from notebooklm_tools.utils.config import get_base_url
 
 from . import constants
 from .data_types import ConversationTurn
-from .errors import AuthRecoveryInProgress, ClientAuthenticationError as AuthenticationError
-from .errors import RPCError
+from .errors import AuthRecoveryInProgress, RPCError
+from .errors import ClientAuthenticationError as AuthenticationError
 from .retry import DEFAULT_BASE_DELAY, DEFAULT_MAX_DELAY, DEFAULT_MAX_RETRIES, is_retryable_error
 from .utils import (
     RPC_NAMES,
@@ -648,10 +648,15 @@ class BaseClient:
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("-" * 70)
                 logger.debug(f"Response Status: {response.status_code}")
-                logger.debug(
-                    "Raw response (first 2000 chars): %s",
-                    response.text[:2000] if response.text else "(empty)",
+                # 배치2 ATOM-2 (upstream cecd757): 디버그 로그 쿠키 redaction.
+                # SID/HSID/SSID/APISID/SAPISID/NID/__Secure-* 평문 노출 차단.
+                _raw = response.text[:2000] if response.text else "(empty)"
+                _raw = re.sub(
+                    r'"(SID|HSID|SSID|APISID|SAPISID|NID|__Secure-\w+)":\s*"[^"]*"',
+                    r'"\1":"[REDACTED]"',
+                    _raw,
                 )
+                logger.debug("Raw response (first 2000 chars): %s", _raw)
                 logger.debug("=" * 70)
 
             response.raise_for_status()

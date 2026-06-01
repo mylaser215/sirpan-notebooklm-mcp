@@ -138,11 +138,17 @@ def save_tokens_to_cache(tokens: AuthTokens, silent: bool = False) -> None:
         silent: If True, don't print confirmation message (for auto-updates)
     """
     cache_path = get_cache_path()
-    with open(cache_path, "w", encoding="utf-8") as f:
+    # 배치2 ATOM-1 (upstream f2fb921): TOCTOU 차단 — write-then-chmod 윈도우 동안
+    # 토큰 파일이 잠깐 world-readable이 되는 사각지대 제거. 0o600을 파일 디스크립터
+    # 생성 시점에 적용.
+    fd = os.open(str(cache_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    try:
+        f = os.fdopen(fd, "w", encoding="utf-8")
+    except BaseException:
+        os.close(fd)
+        raise
+    with f:
         json.dump(tokens.to_dict(), f, indent=2)
-    # Restrict permissions so only the owner can read/write auth tokens
-    with contextlib.suppress(OSError):
-        os.chmod(cache_path, 0o600)
     if not silent:
         logger.info(f"Auth tokens cached to {cache_path}")
 
@@ -415,13 +421,17 @@ class AuthManager:
         # Set restrictive permissions on the directory
         self.profile_dir.chmod(0o700)
 
-        # Save cookies
-        self.cookies_file.write_text(
-            json.dumps(cookies, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-        self.cookies_file.chmod(0o600)
+        # Save cookies — 배치2 ATOM-1 (upstream f2fb921): TOCTOU 차단
+        fd = os.open(str(self.cookies_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            f = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            os.close(fd)
+            raise
+        with f:
+            json.dump(cookies, f, indent=2, ensure_ascii=False)
 
-        # Save metadata
+        # Save metadata — 배치2 ATOM-1 동형
         metadata = {
             "csrf_token": csrf_token,
             "session_id": session_id,
@@ -429,10 +439,14 @@ class AuthManager:
             "build_label": build_label,
             "last_validated": datetime.now().isoformat(),
         }
-        self.metadata_file.write_text(
-            json.dumps(metadata, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-        self.metadata_file.chmod(0o600)
+        fd = os.open(str(self.metadata_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        try:
+            f = os.fdopen(fd, "w", encoding="utf-8")
+        except BaseException:
+            os.close(fd)
+            raise
+        with f:
+            json.dump(metadata, f, indent=2, ensure_ascii=False)
 
         self._profile = Profile(
             name=self.profile_name,
