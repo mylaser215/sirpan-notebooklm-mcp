@@ -52,7 +52,7 @@ def is_wsl() -> bool:
 
     # Check kernel version string for microsoft
     try:
-        version = Path("/proc/version").read_text().lower()
+        version = Path("/proc/version").read_text(encoding="utf-8").lower()
         return "microsoft" in version or "wsl" in version
     except (OSError, FileNotFoundError):
         pass

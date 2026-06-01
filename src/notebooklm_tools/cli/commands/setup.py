@@ -47,7 +47,7 @@ def _read_json_config(path: Path) -> dict:
     if not path.exists():
         return {}
     try:
-        return json.loads(path.read_text())
+        return json.loads(path.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return {}
 
@@ -55,7 +55,7 @@ def _read_json_config(path: Path) -> dict:
 def _write_json_config(path: Path, config: dict) -> None:
     """Write a JSON config file, creating parent dirs as needed."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(config, indent=2) + "\n")
+    path.write_text(json.dumps(config, indent=2) + "\n", encoding="utf-8")
 
 
 def _is_configured(config: dict, key: str = "notebooklm-mcp") -> bool:
@@ -347,14 +347,16 @@ def _setup_codex() -> bool:
 
         if config_path.exists():
             try:
-                content = config_path.read_text()
+                content = config_path.read_text(encoding="utf-8")
                 config = tomllib.loads(content)
                 mcp_servers = config.get("mcp_servers", {})
                 if "notebooklm" in mcp_servers or "notebooklm-mcp" in mcp_servers:
                     console.print("[green]✓[/green] Already configured in Codex CLI")
                     return True
             except Exception:
-                content = config_path.read_text() if config_path.exists() else ""
+                content = (
+                    config_path.read_text(encoding="utf-8") if config_path.exists() else ""
+                )
         else:
             content = ""
 
@@ -368,7 +370,7 @@ enabled = true
         new_content = content.rstrip() + "\n" + section if content.strip() else section.lstrip()
 
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(new_content)
+        config_path.write_text(new_content, encoding="utf-8")
         console.print("[green]✓[/green] Added to Codex CLI (config.toml)")
         console.print(f"  [dim]{config_path}[/dim]")
         return True
@@ -494,7 +496,7 @@ def _is_already_configured(client_id: str) -> bool:
                 # Check config.toml directly
                 toml_path = _codex_config_path() / "config.toml"
                 if toml_path.exists():
-                    config = tomllib.loads(toml_path.read_text())
+                    config = tomllib.loads(toml_path.read_text(encoding="utf-8"))
                     mcp = config.get("mcp_servers", {})
                     return "notebooklm" in mcp or "notebooklm-mcp" in mcp
         elif client_id == "opencode":

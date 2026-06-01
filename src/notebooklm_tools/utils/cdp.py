@@ -136,7 +136,7 @@ def _read_port_map() -> dict[str, dict]:
         return {}
 
     try:
-        data = json.loads(map_file.read_text())
+        data = json.loads(map_file.read_text(encoding="utf-8"))
     except (json.JSONDecodeError, OSError):
         return {}
 

@@ -396,7 +396,7 @@ def save_config(config: Config) -> None:
 
     # Convert to TOML format
     toml_content = _config_to_toml(config)
-    config_file.write_text(toml_content)
+    config_file.write_text(toml_content, encoding="utf-8")
 
 
 def _config_to_toml(config: Config) -> str:
