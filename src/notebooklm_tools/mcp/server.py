@@ -27,6 +27,19 @@ from starlette.responses import JSONResponse
 
 from notebooklm_tools import __version__
 
+# External-bind fail-close (배치1 ATOM-3, upstream 8f63d6f 동형).
+# `NOTEBOOKLM_ALLOW_EXTERNAL_BIND` 미설정 시 비-loopback 바인딩 거부.
+_FALSY = frozenset({"false", "0", "no", "off"})
+
+
+def _env_bool(name: str, default: bool = False) -> bool:
+    """환경변수를 boolean으로 해석. 미설정/empty → default; false/0/no/off (대소문자 무관) → False; 그 외 → True."""
+    raw = os.environ.get(name, "")
+    if not raw:
+        return default
+    return raw.lower() not in _FALSY
+
+
 # Initialize MCP server
 mcp = FastMCP(
     name="notebooklm",
@@ -187,32 +200,48 @@ Examples:
     # the JSON-RPC protocol on Windows (especially with non-English locales)
     if args.transport == "stdio":
         mcp.run(show_banner=False)
-    elif args.transport == "http":
+    elif args.transport in ("http", "sse"):
+        # 배치1 ATOM-3: external-bind fail-close (upstream 8f63d6f 동형).
+        # 비-loopback 바인딩 시 NOTEBOOKLM_ALLOW_EXTERNAL_BIND=1 미설정이면 거부.
         _LOOPBACK_HOSTS = {"127.0.0.1", "localhost", "::1"}
         if args.host not in _LOOPBACK_HOSTS:
+            if not _env_bool("NOTEBOOKLM_ALLOW_EXTERNAL_BIND"):
+                import sys
+
+                print(
+                    f"SECURITY ERROR: Refusing to bind {args.transport.upper()} transport "
+                    f"to non-loopback address '{args.host}'.\n"
+                    "There is no built-in authentication — binding externally exposes\n"
+                    "your Google cookies to anyone on the network.\n\n"
+                    "To override (only if you fully understand the risk), set:\n"
+                    "  NOTEBOOKLM_ALLOW_EXTERNAL_BIND=1",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
             import warnings
 
             warnings.warn(
-                "SECURITY WARNING: HTTP transport is bound to a non-loopback address "
-                f"('{args.host}'). There is no built-in authentication. "
-                "Do not expose this port to untrusted networks.",
+                f"SECURITY WARNING: {args.transport.upper()} transport is bound to a "
+                f"non-loopback address ('{args.host}'). There is no built-in "
+                "authentication. Do not expose this port to untrusted networks.",
                 stacklevel=2,
             )
-        mcp.run(
-            transport="streamable-http",
-            host=args.host,
-            port=args.port,
-            path=args.path,
-            stateless_http=args.stateless,
-            show_banner=False,
-        )
-    elif args.transport == "sse":
-        mcp.run(
-            transport="sse",
-            host=args.host,
-            port=args.port,
-            show_banner=False,
-        )
+        if args.transport == "http":
+            mcp.run(
+                transport="streamable-http",
+                host=args.host,
+                port=args.port,
+                path=args.path,
+                stateless_http=args.stateless,
+                show_banner=False,
+            )
+        else:
+            mcp.run(
+                transport="sse",
+                host=args.host,
+                port=args.port,
+                show_banner=False,
+            )
 
 
 if __name__ == "__main__":
