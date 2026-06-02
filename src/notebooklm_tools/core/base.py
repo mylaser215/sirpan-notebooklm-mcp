@@ -17,6 +17,7 @@ import re
 import threading
 import time
 import urllib.parse
+from collections import OrderedDict
 from typing import Any
 
 import httpx
@@ -55,6 +56,29 @@ SOURCE_ADD_TIMEOUT = 120.0  # Extended timeout for all source operations
 # future가 시작 후 이 시간 초과 시 강제 None 리셋 + 새 시도 — 좀비 chrome 등으로
 # future가 영원히 done() 안 되는 영구 잠금 차단. NLM 자문 conv 21df4678.
 HEADLESS_AUTH_DEADLOCK_TIMEOUT_SEC = 60.0
+
+
+def _safe_int_env(name: str, default: int) -> int:
+    """Read an integer env var, falling back to `default` if missing or unparseable.
+
+    A value of 0 (or negative, clamped here) means "no cap" for cache-size knobs.
+    Negative values are clamped to 0 and logged so a stray `-1` doesn't silently
+    disable a cap the user thought they had set.
+
+    세션58 ATOM-1 (upstream 46fe5a0 #213): bounded conversation cache helper.
+    """
+    raw = os.environ.get(name)
+    if raw is None or raw == "":
+        return default
+    try:
+        value = int(raw)
+    except ValueError:
+        logger.warning("Invalid %s=%r; falling back to default %d", name, raw, default)
+        return default
+    if value < 0:
+        logger.warning("%s=%d is negative; clamping to 0 (no cap)", name, value)
+        return 0
+    return value
 
 
 class BaseClient:
@@ -302,9 +326,22 @@ class BaseClient:
         self._session_id = session_id
         self._bl = build_label
 
-        # Conversation cache for follow-up queries
-        # Key: conversation_id, Value: list of ConversationTurn objects
-        self._conversation_cache: dict[str, list[ConversationTurn]] = {}
+        # Conversation cache for follow-up queries.
+        # Key: conversation_id, Value: list of ConversationTurn objects.
+        #
+        # 세션58 ATOM-1 (upstream 46fe5a0 #213): Bounded to prevent unbounded
+        # memory growth in long-lived MCP server processes. Three env-var knobs
+        # (set any to 0 to disable that cap). The dict itself is an OrderedDict
+        # for LRU eviction; per-conversation turn lists are FIFO-trimmed in
+        # `_cache_conversation_turn`.
+        self._max_turns_per_conversation = _safe_int_env(
+            "NOTEBOOKLM_CONVERSATION_MAX_TURNS", default=50
+        )
+        self._max_conversations = _safe_int_env("NOTEBOOKLM_CONVERSATION_MAX_CONVS", default=500)
+        self._max_chars_per_turn = _safe_int_env(
+            "NOTEBOOKLM_CONVERSATION_MAX_CHARS_PER_TURN", default=100_000
+        )
+        self._conversation_cache: OrderedDict[str, list[ConversationTurn]] = OrderedDict()
 
         # Request counter for _reqid parameter (required for query endpoint)
         self._reqid_counter = random.randint(100000, 999999)

@@ -164,7 +164,14 @@ Examples:
         "--stateless",
         action="store_true",
         default=os.environ.get("NOTEBOOKLM_MCP_STATELESS", "").lower() == "true",
-        help="Enable stateless mode for horizontal scaling",
+        help=(
+            "Enable stateless mode for horizontal scaling. NOTE: this affects "
+            "the MCP HTTP transport layer only — it does NOT control the "
+            "in-process conversation history cache. To bound the conversation "
+            "cache (e.g. for long-lived servers), set "
+            "NOTEBOOKLM_CONVERSATION_MAX_TURNS / NOTEBOOKLM_CONVERSATION_MAX_CONVS / "
+            "NOTEBOOKLM_CONVERSATION_MAX_CHARS_PER_TURN."
+        ),
     )
     parser.add_argument(
         "--debug",
