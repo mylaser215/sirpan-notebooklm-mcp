@@ -151,6 +151,7 @@ def login_callback(
     To switch active accounts, run `nlm login switch <profile>`.
     """
     from notebooklm_tools.core.auth import AuthManager
+    from notebooklm_tools.core.errors import ClientAuthenticationError
     from notebooklm_tools.core.exceptions import AccountMismatchError, NLMError
     from notebooklm_tools.utils.config import get_config
 
@@ -203,10 +204,16 @@ def login_callback(
             console.print(f"  Notebooks found: {len(notebooks)}")
             if p.email:
                 console.print(f"  Account: {p.email}")
-        except NLMError as e:
-            console.print(f"[red]✗[/red] Authentication failed: {e.message}")
-            if e.hint:
-                console.print(f"[dim]{e.hint}[/dim]")
+        # 세션58 ATOM-3 (upstream 519483b #211): ClientAuthenticationError도
+        # graceful 종료 — 만료 인증으로 `nlm login --check` 시 raw exception
+        # propagate되는 crash 방어. NLMError가 아닌 inner-client exception이라
+        # 별 catch 필요.
+        except (NLMError, ClientAuthenticationError) as e:
+            message = getattr(e, "message", str(e))
+            hint = getattr(e, "hint", None)
+            console.print(f"[red]✗[/red] Authentication failed: {message}")
+            if hint:
+                console.print(f"[dim]{hint}[/dim]")
             raise typer.Exit(2) from e
         return
 
