@@ -48,6 +48,22 @@ def patched_refresh_auth_deps(monkeypatch):
         lambda: state["cached"],
     )
 
+    # 세션58 ATOM-2 (upstream #212): RTS healthy 분기에 신설된 live 검증
+    # layer (`check_auth(live=True)`)를 default valid=True로 mock — 본 가드의
+    # 의도는 RTS fail-close 흐름 검증이지 live HTTP 의존 아님.
+    state["check_auth_valid"] = True
+    state["check_auth_reason"] = None
+
+    def fake_check_auth(**kw):
+        return core_auth.AuthCheckResult(
+            valid=state["check_auth_valid"],
+            reason=state["check_auth_reason"],
+            live=True,
+            profile="default",
+        )
+
+    monkeypatch.setattr(core_auth, "check_auth", fake_check_auth)
+
     def fake_headless():
         if state["headless_exc"] is not None:
             raise state["headless_exc"]
@@ -183,4 +199,5 @@ def test_refresh_auth_success_on_rts_healthy_with_cache(patched_refresh_auth_dep
     result = refresh_auth()
 
     assert result["status"] == "success"
-    assert result["message"] == "Auth tokens reloaded from disk cache."
+    # 세션58 ATOM-2 (upstream #212): live 검증 layer 추가로 메시지 갱신.
+    assert result["message"] == "Auth tokens reloaded from disk cache and validated."

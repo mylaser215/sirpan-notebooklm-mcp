@@ -584,3 +584,74 @@ def _is_rts_expiring(profile_name: str = "default", margin_sec: int = 60) -> boo
         return False
     except Exception:
         return True
+
+
+# 세션58 ATOM-2 (upstream eadb8c3 #212 옵션 B 재작성) — PR #203 의존 없이 우리 fork
+# `_refresh_auth_tokens()` ValueError 메커니즘 재활용. v0.6.15 통합 시 1:1 매핑만 필요.
+@dataclass
+class AuthCheckResult:
+    """Result of an auth validity check.
+
+    Compatible with upstream PR #203 signature so #212 regression tests
+    (tests/test_mcp_auth_studio_failures.py) port verbatim.
+
+    Fields:
+        valid: True if auth tokens are valid.
+        reason: Human-readable reason when invalid (None when valid).
+        live: True if the check performed a live HTTP validation (not just
+              disk-cache existence).
+        profile: Profile name checked (defaults to "default").
+    """
+
+    valid: bool
+    reason: str | None = None
+    live: bool = False
+    profile: str | None = None
+
+
+def check_auth(live: bool = False, profile_name: str = "default") -> AuthCheckResult:
+    """Check whether NotebookLM auth is currently valid.
+
+    Two modes:
+    - live=False (cheap): Only check that cached tokens exist on disk. O(1),
+      no HTTP. Useful for quick gating where false-positive is acceptable.
+    - live=True (authoritative): Perform a real HTTP validation by triggering
+      our existing `_refresh_auth_tokens()` page fetch. Catches the
+      "RTS healthy but cookies externally revoked" case that disk-existence
+      alone cannot detect (NLM Q3 ●●● 정확히 이 시나리오).
+
+    Brittle-defense (NLM Q1 함정 2): catch ValueError + AuthenticationError +
+    broad Exception so a future Google redirect-pattern change cannot silently
+    flip valid→False to a False Positive valid=True. Errors always surface as
+    valid=False with the message as reason.
+    """
+    if not live:
+        cached = load_cached_tokens()
+        if cached and cached.cookies:
+            return AuthCheckResult(valid=True, live=False, profile=profile_name)
+        return AuthCheckResult(
+            valid=False,
+            reason="No cached auth tokens on disk.",
+            live=False,
+            profile=profile_name,
+        )
+
+    # Live HTTP validation path — reuse our fork's `_refresh_auth_tokens()`.
+    try:
+        # Lazy import to avoid core ↔ mcp circular import at module load time.
+        from notebooklm_tools.mcp.tools._utils import get_client
+
+        client = get_client()
+        client._refresh_auth_tokens()
+        return AuthCheckResult(valid=True, live=True, profile=profile_name)
+    except Exception as e:  # noqa: BLE001
+        # Includes ValueError (our fork's "Authentication expired" path),
+        # ClientAuthenticationError, and any future Google change. Brittle
+        # defense — never let a redirect-pattern shift produce a silent
+        # False Positive (NLM Q1 함정 2).
+        return AuthCheckResult(
+            valid=False,
+            reason=f"{type(e).__name__}: {e}",
+            live=True,
+            profile=profile_name,
+        )

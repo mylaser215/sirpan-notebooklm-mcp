@@ -73,9 +73,26 @@ def refresh_auth() -> ResultDict:
         if cached and cached.cookies and not _is_rts_expiring():
             reset_client()
             get_client()
+
+            # 세션58 ATOM-2 (upstream eadb8c3 #212): live HTTP 검증 layer.
+            # 우리 fork `bbae413` RTS fail-close와 직교 방어 (NLM Q3 ●●●):
+            # - RTS 가드는 *예측 가능* 10분 만료 차단 (O(1))
+            # - 본 layer는 *예측 불가* 외부 로그아웃 / Google 측 세션 무효화
+            #   (RTS 미만료 윈도우 내 거짓 success) 차단
+            from notebooklm_tools.core.auth import check_auth
+
+            check = check_auth(live=True)
+            if not check.valid:
+                return error_result(
+                    "Auth tokens were reloaded from disk but are no longer valid "
+                    f"(reason: {check.reason}). A disk reload cannot revive expired "
+                    "credentials — run `nlm login` in a terminal to re-authenticate.",
+                    status="expired",
+                    reason=check.reason,
+                )
             return {
                 "status": "success",
-                "message": "Auth tokens reloaded from disk cache.",
+                "message": "Auth tokens reloaded from disk cache and validated.",
             }
 
         # No cache (or RTS rotated mid-call): try headless auth if Chrome profile exists
