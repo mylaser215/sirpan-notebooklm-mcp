@@ -1,4 +1,4 @@
-"""Generate NLM RAG-friendly `<basename>.{py,ts,tsx}.md` wrappers from source files.
+"""Generate NLM RAG-friendly `<basename>.{py,ts,tsx,json}.md` wrappers from source files.
 
 Unified successor to `generate_py_md.py` (세션35) + `generate_ts_md.py` (세션39).
 Dispatch is driven by file extension via the `PARSERS` registry at the bottom
@@ -38,6 +38,7 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import json
 import re
 import sys
 from datetime import datetime
@@ -310,6 +311,127 @@ def _render_ts(parsed: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# JSON: 키 구조 추출 (top-level keys + 값 타입/요약) + 원본 fence
+# ---------------------------------------------------------------------------
+
+def _json_type(value: object) -> str:
+    """Map a parsed JSON value to its type label (bool before int — bool ⊂ int)."""
+    if value is None:
+        return "null"
+    if isinstance(value, bool):
+        return "boolean"
+    if isinstance(value, (int, float)):
+        return "number"
+    if isinstance(value, str):
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, dict):
+        return "object"
+    return "unknown"
+
+
+def _json_value_summary(value: object) -> str:
+    """One-line summary of a JSON value for the 키 구조 section."""
+    t = _json_type(value)
+    if t == "object":
+        assert isinstance(value, dict)
+        keys = list(value.keys())
+        if not keys:
+            return "object — (빈 object)"
+        preview = ", ".join(f"`{k}`" for k in keys[:8])
+        more = f" … (+{len(keys) - 8})" if len(keys) > 8 else ""
+        return f"object — {len(keys)} keys: {preview}{more}"
+    if t == "array":
+        assert isinstance(value, list)
+        if not value:
+            return "array — (빈 배열)"
+        elem_types = ", ".join(sorted({_json_type(v) for v in value}))
+        return f"array — {len(value)} items ({elem_types})"
+    if t == "string":
+        assert isinstance(value, str)
+        s = value.replace("\n", " ")
+        return f'string — "{s[:60]}{"…" if len(s) > 60 else ""}"'
+    if t == "boolean":
+        return f"boolean — {'true' if value else 'false'}"  # JSON 표기 (not Python True/False)
+    if t == "null":
+        return "null"
+    if t == "number":
+        return f"number — {value!r}"
+    return ""
+
+
+def _parse_json(path: Path) -> dict:
+    """Extract top-level JSON key structure. Invalid JSON degrades gracefully
+    (raw source is still preserved in the wrapper so NLM keeps the content)."""
+    source = path.read_text(encoding="utf-8")
+    try:
+        data = json.loads(source)
+        error: str | None = None
+    except json.JSONDecodeError as e:
+        data = None
+        error = str(e)
+
+    items: list[dict] = []
+    if isinstance(data, dict):
+        for key, value in data.items():
+            items.append(
+                {
+                    "name": key,
+                    "type": _json_type(value),
+                    "summary": _json_value_summary(value),
+                }
+            )
+
+    root_type = _json_type(data) if error is None else None
+    root_len = len(data) if isinstance(data, (dict, list)) else None
+    return {
+        "items": items,
+        "root_type": root_type,
+        "root_len": root_len,
+        "error": error,
+        "source": source,
+    }
+
+
+def _render_json(parsed: dict) -> list[str]:
+    """Render the JSON key-structure section + source fence."""
+    lines: list[str] = []
+    lines.append("## 키 구조")
+    lines.append("")
+
+    error = parsed.get("error")
+    if error:
+        lines.append(f"*(JSON 파싱 실패: {error} — 원본 코드만 보존)*")
+        lines.append("")
+    elif parsed["root_type"] == "object":
+        items = parsed["items"]
+        if not items:
+            lines.append("*(빈 object)*")
+            lines.append("")
+        for item in items:
+            lines.append(f"### `{item['name']}` (*{item['type']}*)")
+            lines.append("")
+            if item["summary"]:
+                lines.append(item["summary"])
+                lines.append("")
+    else:
+        root_len = parsed.get("root_len")
+        suffix = f": {root_len} 요소" if root_len is not None else ""
+        lines.append(f"*(루트가 {parsed['root_type']}{suffix})*")
+        lines.append("")
+
+    # 원본 코드
+    lines.append("## 원본 코드")
+    lines.append("")
+    lines.append("```json")
+    lines.append(parsed["source"].rstrip("\n"))
+    lines.append("```")
+    lines.append("")
+    return lines
+
+
+# ---------------------------------------------------------------------------
 # Dispatch registry (OCP — adding a language = registering one pair)
 # ---------------------------------------------------------------------------
 
@@ -320,6 +442,7 @@ PARSERS: dict[str, tuple[Parser, Renderer]] = {
     ".py": (_parse_py, _render_py),
     ".ts": (_parse_ts, _render_ts),
     ".tsx": (_parse_ts, _render_ts),
+    ".json": (_parse_json, _render_json),
 }
 
 SUPPORTED_EXTS: set[str] = set(PARSERS.keys())
@@ -363,7 +486,7 @@ def render_md(
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Generate NLM RAG-friendly <basename>.{py,ts,tsx}.md wrapper for a "
+            "Generate NLM RAG-friendly <basename>.{py,ts,tsx,json}.md wrapper for a "
             "source file. Dispatch is automatic by file extension."
         ),
     )

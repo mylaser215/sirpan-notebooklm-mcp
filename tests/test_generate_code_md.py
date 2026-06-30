@@ -168,3 +168,63 @@ def test_unsupported_extension(tmp_path: Path) -> None:
     result = _run(str(src))
     assert result.returncode == 2
     assert "unsupported extension" in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# JSON 구조추출 (.json 지원 — bundle followup B①)
+# ---------------------------------------------------------------------------
+
+def test_json_structure_extraction(tmp_path: Path) -> None:
+    """object 루트: top-level 키 이름·타입·요약 + 원본 fence가 모두 나온다."""
+    src = tmp_path / "sample.json"
+    src.write_text(
+        '{"name": "x", "version": 2, "enabled": true, "deps": ["a", "b"], "cfg": {"k": 1}}',
+        encoding="utf-8",
+    )
+    out = tmp_path / "sample.json.md"
+    result = _run(str(src), "--out", str(out), "--force")
+    assert result.returncode == 0, result.stderr
+    text = out.read_text(encoding="utf-8")
+    assert "## 키 구조" in text
+    # 키 이름
+    assert "`name`" in text and "`deps`" in text and "`cfg`" in text
+    # 타입 라벨
+    assert "*string*" in text and "*array*" in text and "*object*" in text
+    # boolean/null은 Python repr이 아닌 JSON 표기
+    assert "boolean — true" in text
+    assert "True" not in text.split("## 원본 코드")[0]  # 키 구조 섹션엔 Python True 없음
+    # 원본 보존
+    assert "```json" in text
+
+
+def test_json_invalid_graceful(tmp_path: Path) -> None:
+    """깨진 JSON도 exit 0 — 구조추출만 실패하고 원본은 보존된다."""
+    src = tmp_path / "broken.json"
+    src.write_text('{"a": 1,, }', encoding="utf-8")
+    out = tmp_path / "broken.json.md"
+    result = _run(str(src), "--out", str(out), "--force")
+    assert result.returncode == 0, result.stderr
+    text = out.read_text(encoding="utf-8")
+    assert "파싱 실패" in text
+    assert "```json" in text  # 원본은 그대로 살아있음
+
+
+def test_json_root_array(tmp_path: Path) -> None:
+    """비-object 루트(array)도 루트 타입·길이를 표기한다."""
+    src = tmp_path / "arr.json"
+    src.write_text("[1, 2, 3]", encoding="utf-8")
+    out = tmp_path / "arr.json.md"
+    result = _run(str(src), "--out", str(out), "--force")
+    assert result.returncode == 0, result.stderr
+    text = out.read_text(encoding="utf-8")
+    assert "루트가 array" in text
+
+
+def test_json_is_supported_extension(tmp_path: Path) -> None:
+    """.json은 지원 확장자 — unsupported가 아니라 정상 dispatch(여기선 missing)."""
+    src = tmp_path / "x.json"
+    src.write_text("{}", encoding="utf-8")
+    result = _run(str(src), "--check")  # 기본 out(x.json.md) 부재 → missing(2)
+    assert result.returncode == 2
+    assert "missing" in result.stdout
+    assert "unsupported" not in result.stderr
