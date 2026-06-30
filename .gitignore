@@ -8,10 +8,12 @@ __pycache__/
 *.py.md
 *.ts.md
 *.tsx.md
+*.json.md
 # 회귀 fixture는 추적 대상 (ground-truth 박제)
 !tests/fixtures/**/*.py.md
 !tests/fixtures/**/*.ts.md
 !tests/fixtures/**/*.tsx.md
+!tests/fixtures/**/*.json.md
 .Python
 build/
 develop-eggs/
