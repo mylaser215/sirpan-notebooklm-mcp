@@ -52,6 +52,12 @@ else:
 DEFAULT_TIMEOUT = 30.0  # Default for most operations
 SOURCE_ADD_TIMEOUT = 120.0  # Extended timeout for all source operations
 
+# 무거운 메타 read RPC(대형 노트북: get_notebook / get_notebook_sources_with_types
+# / query 내부 source_id 추출)용 read timeout. 소스 페이로드가 커지면 메타 응답이
+# 고정 30초를 초과해 read timeout이 발생하므로 read만 넉넉히 확대한다.
+# connect는 짧게(15s) 유지해 진짜 네트워크 끊김은 빨리 감지. env 오버라이드 가능.
+READ_TIMEOUT = float(os.environ.get("NOTEBOOKLM_READ_TIMEOUT", "180.0"))
+
 # Layer 3 백그라운드 headless auth 데드락 방지 타임아웃 (세션56 Q4 ●●● 권고).
 # future가 시작 후 이 시간 초과 시 강제 None 리셋 + 새 시도 — 좀비 chrome 등으로
 # future가 영원히 done() 안 되는 영구 잠금 차단. NLM 자문 conv 21df4678.
@@ -454,7 +460,7 @@ class BaseClient:
                     "X-Same-Domain": "1",
                     "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
                 },
-                timeout=30.0,
+                timeout=httpx.Timeout(connect=15.0, read=READ_TIMEOUT, write=30.0, pool=30.0),
             )
 
             # Explicitly set headers if needed, though constructor handles most
@@ -476,7 +482,7 @@ class BaseClient:
                 "Referer": f"{self._get_base_url()}/",
                 "X-Same-Domain": "1",
             },
-            timeout=30.0,
+            timeout=httpx.Timeout(connect=15.0, read=READ_TIMEOUT, write=30.0, pool=30.0),
         )
         if self.csrf_token:
             client.headers["X-Goog-Csrf-Token"] = self.csrf_token
@@ -676,7 +682,7 @@ class BaseClient:
                 logger.debug(_format_debug_json(decoded_body))
 
         try:
-            if timeout:
+            if timeout is not None:
                 response = client.post(url, content=body, timeout=timeout)
             else:
                 response = client.post(url, content=body)
