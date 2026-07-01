@@ -28,7 +28,7 @@ def _write_words(path: Path, n: int) -> Path:
     return path
 
 PROJ_ROOT = Path(__file__).resolve().parent.parent
-SCRIPT = PROJ_ROOT / "scripts" / "generate_bundle_md.py"
+SCRIPT = PROJ_ROOT / "src" / "notebooklm_tools" / "scripts" / "generate_bundle_md.py"
 FIXTURE_DIR = PROJ_ROOT / "tests" / "fixtures" / "generate_bundle_md"
 SAMPLE1_INPUT = FIXTURE_DIR / "sample1_input"
 

@@ -126,6 +126,8 @@ Environment Variables:
   NOTEBOOKLM_MCP_DEBUG         Enable debug logging (true/false)
   NOTEBOOKLM_HL                Interface language and default artifact language (default: en)
   NOTEBOOKLM_QUERY_TIMEOUT     Query timeout in seconds (default: 120.0)
+  NOTEBOOKLM_READ_TIMEOUT      Heavy-metadata read timeout in seconds (default: 180.0)
+  NOTEBOOKLM_ADD_TIMEOUT       Source add/upload timeout in seconds (default: 180.0)
 
 Examples:
   notebooklm-mcp                              # Default stdio transport

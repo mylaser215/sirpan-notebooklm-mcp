@@ -196,7 +196,7 @@ class TestNotebookLMClientAuth:
             assert sources[0]["source_type_name"] == "web_page"
 
     def test_add_drive_source_uses_extended_timeout(self, mock_client):
-        """Test that add_drive_source uses extended timeout (120s) for large files."""
+        """Test that add_drive_source uses extended timeout (180s) for large files."""
         from notebooklm_tools.core.base import SOURCE_ADD_TIMEOUT
 
         with (
@@ -218,7 +218,7 @@ class TestNotebookLMClientAuth:
             # Verify timeout=SOURCE_ADD_TIMEOUT was passed
             _, call_kwargs = http_client.post.call_args
             assert call_kwargs.get("timeout") == SOURCE_ADD_TIMEOUT
-            assert SOURCE_ADD_TIMEOUT == 120.0  # Verify constant value
+            assert SOURCE_ADD_TIMEOUT == 180.0  # Verify constant value (add-timeout: 120→180 env화)
 
     def test_add_drive_source_timeout_returns_status(self, mock_client):
         """Test that add_drive_source returns timeout status on timeout exception."""

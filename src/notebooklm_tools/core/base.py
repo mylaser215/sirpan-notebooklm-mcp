@@ -50,7 +50,11 @@ else:
 
 # Timeout configuration (seconds)
 DEFAULT_TIMEOUT = 30.0  # Default for most operations
-SOURCE_ADD_TIMEOUT = 120.0  # Extended timeout for all source operations
+# 모든 소스 추가(add) 작업용 확장 timeout — URL/텍스트/드라이브 + 파일 업로드
+# (register RPC + resumable upload 세션) 전부 포함. 대형 노트북에서 파일 register가
+# 60s로는 간헐 timeout이라 READ_TIMEOUT(180)과 대칭으로 확대(register는 노트북 상태
+# 의존 = read 성격). env 오버라이드 가능. (세션 add-timeout: 120→180 env화 + file 편입)
+SOURCE_ADD_TIMEOUT = float(os.environ.get("NOTEBOOKLM_ADD_TIMEOUT", "180.0"))
 
 # 무거운 메타 read RPC(대형 노트북: get_notebook / get_notebook_sources_with_types
 # / query 내부 source_id 추출)용 read timeout. 소스 페이로드가 커지면 메타 응답이

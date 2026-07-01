@@ -1008,7 +1008,9 @@ class SourceMixin(BaseClient):
         ]
 
         source_path = f"/notebook/{notebook_id}"
-        result = self._call_rpc(self.RPC_ADD_SOURCE_FILE, params, path=source_path, timeout=60.0)
+        result = self._call_rpc(
+            self.RPC_ADD_SOURCE_FILE, params, path=source_path, timeout=SOURCE_ADD_TIMEOUT
+        )
 
         # Extract SOURCE_ID from nested response
         def extract_id(data: Any) -> str | None:
@@ -1073,7 +1075,7 @@ class SourceMixin(BaseClient):
             ensure_ascii=False,
         )
 
-        with httpx.Client(timeout=60.0, cookies=cookies) as client:
+        with httpx.Client(timeout=SOURCE_ADD_TIMEOUT, cookies=cookies) as client:
 
             def _do_request() -> httpx.Response:
                 resp = client.post(url, headers=headers, content=body)

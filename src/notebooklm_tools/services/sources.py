@@ -1055,9 +1055,11 @@ class SyncBundleResult(TypedDict):
     message: str
 
 
-# scripts/generate_bundle_md.py absolute path (repo-relative; install layout TBD).
+# generate_bundle_md.py lives inside the package (src/notebooklm_tools/scripts/)
+# so it ships in the wheel and resolves under any install layout (no editable
+# fallback). parents[1] == notebooklm_tools/ from services/sources.py.
 _BUNDLE_TOOL_SCRIPT = (
-    Path(__file__).resolve().parents[3] / "scripts" / "generate_bundle_md.py"
+    Path(__file__).resolve().parents[1] / "scripts" / "generate_bundle_md.py"
 )
 
 # Default chunking threshold (words) — mirrors DEFAULT_BUNDLE_MAX_WORDS in
@@ -1145,7 +1147,7 @@ def sync_bundle(
         raise ServiceError(
             f"Bundle tool not found at {script}",
             user_message="Bundle generator script missing.",
-            hint="Verify the sirpan-notebooklm-mcp repo layout (scripts/generate_bundle_md.py).",
+            hint="Verify the sirpan-notebooklm-mcp repo layout (src/notebooklm_tools/scripts/generate_bundle_md.py).",
         )
     py = python_executable or sys.executable
     max_words = bundle.get("max_words")

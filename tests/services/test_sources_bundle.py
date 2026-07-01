@@ -57,7 +57,13 @@ def registry_path(tmp_path: Path, origin_files: list[Path]) -> Path:
 
 def _bundle_tool_script() -> Path:
     """Resolve the real generator script for E2E builder invocation."""
-    return Path(__file__).resolve().parents[2] / "scripts" / "generate_bundle_md.py"
+    return (
+        Path(__file__).resolve().parents[2]
+        / "src"
+        / "notebooklm_tools"
+        / "scripts"
+        / "generate_bundle_md.py"
+    )
 
 
 # ---------------------------------------------------------------------------

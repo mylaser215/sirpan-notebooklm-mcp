@@ -84,3 +84,24 @@ def test_call_rpc_passes_explicit_zero_timeout(client):
     assert result == {"ok": True}
     _, kwargs = fake_client.post.call_args
     assert kwargs.get("timeout") == 0.0
+
+
+def test_add_timeout_default_and_env(monkeypatch):
+    """SOURCE_ADD_TIMEOUT: 기본 180s + NOTEBOOKLM_ADD_TIMEOUT env 오버라이드.
+
+    파일 업로드 경로(register RPC + resumable upload 세션)가 옛 60s 하드코딩에서
+    풀려 다른 소스 add(url/text/drive)와 동일한 확장 timeout을 공유하는지 가드.
+    (add-timeout 픽스: 120→180 env화 + file 경로 편입)
+    """
+    import notebooklm_tools.core.base as base_mod
+
+    assert base_mod.SOURCE_ADD_TIMEOUT == 180.0  # 기본값 (120→180 상향, READ_TIMEOUT과 대칭)
+
+    monkeypatch.setenv("NOTEBOOKLM_ADD_TIMEOUT", "300")
+    try:
+        importlib.reload(base_mod)
+        assert base_mod.SOURCE_ADD_TIMEOUT == 300.0
+    finally:
+        monkeypatch.delenv("NOTEBOOKLM_ADD_TIMEOUT", raising=False)
+        importlib.reload(base_mod)
+    assert base_mod.SOURCE_ADD_TIMEOUT == 180.0  # 기본값 복원
