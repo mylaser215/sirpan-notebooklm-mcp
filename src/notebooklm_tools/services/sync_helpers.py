@@ -227,7 +227,14 @@ class DriftReport(TypedDict):
 # Tier 2 N:1 번들 매핑 (Batch 3 ATOM-1)
 # ---------------------------------------------------------------------------
 
-_BUNDLE_TITLE_RE = re.compile(r"^(?P<name>[\w-]+_Bundle)\.md\b", re.IGNORECASE)
+# Bundle title → (name, optional part number). Non-greedy `.+?` peels an
+# optional `_partN` suffix so 1:N chunked bundles (`{name}_part1.md`) map back
+# to `{name}`. No hard-coded `_Bundle` suffix — the registry-key check in
+# _classify_bundle is the sole gate (실측: 실 registry 키는 `NLM_MCP_Archive`
+# 처럼 `_Bundle` 접미사가 없어 옛 정규식이 matched_bundle 인식을 못 했음).
+_BUNDLE_TITLE_RE = re.compile(
+    r"^(?P<name>.+?)(?:_part(?P<part>\d+))?\.md$", re.IGNORECASE
+)
 
 
 def _default_bundle_registry_path() -> Path:
@@ -254,9 +261,12 @@ def load_bundle_registry(registry_path: Path | None = None) -> dict[str, dict[st
 def _classify_bundle(
     title: str, registry: dict[str, dict[str, Any]]
 ) -> tuple[str | None, list[str]]:
-    """title 이 ``{bundle_name}.md`` 패턴 + registry 매칭 시 (bundle_name, origins) 반환.
+    """title 이 ``{name}.md`` 또는 ``{name}_partN.md`` + registry 매칭 시
+    (bundle_name, origins) 반환. part 번호는 무시하고 동일 도메인 origins
+    서브셋 전체를 반환 (분할 part 다수가 같은 번들 기원으로 묶임).
 
-    매칭 실패 시 ``(None, [])`` 반환 — 호출자는 기존 1:1 매칭 흐름으로 폴백.
+    매칭 실패(또는 name 이 registry 미등록)면 ``(None, [])`` — 호출자는 기존
+    1:1 매칭 흐름으로 폴백. registry-key 존재 검사가 유일한 FP 게이트.
     """
     m = _BUNDLE_TITLE_RE.match(title.strip())
     if not m:

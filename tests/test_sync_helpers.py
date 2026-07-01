@@ -371,6 +371,43 @@ def test_classify_bundle_not_registered(tmp_path: Path) -> None:
     assert origins == []
 
 
+def test_classify_bundle_no_bundle_suffix_key(tmp_path: Path) -> None:
+    """실 registry 키(`NLM_MCP_Archive`, `_Bundle` 접미사 없음)도 매칭 (B② 결함 픽스)."""
+    reg_path = _write_bundle_registry(
+        tmp_path / "reg.json",
+        {"NLM_MCP_Archive": {"domain": "test", "files": ["/abs/v2.md"]}},
+    )
+    registry = load_bundle_registry(reg_path)
+    name, origins = _classify_bundle("NLM_MCP_Archive.md", registry)
+    assert name == "NLM_MCP_Archive"
+    assert origins == ["/abs/v2.md"]
+
+
+def test_classify_bundle_part_suffix(tmp_path: Path) -> None:
+    """`{name}_partN.md` → 동일 name + 도메인 origins 서브셋 전체 (1:N 역매핑)."""
+    reg_path = _write_bundle_registry(
+        tmp_path / "reg.json",
+        {"NLM_MCP_Archive": {"domain": "test", "files": ["/abs/v2.md", "/abs/v3.md"]}},
+    )
+    registry = load_bundle_registry(reg_path)
+    for title in ("NLM_MCP_Archive_part1.md", "NLM_MCP_Archive_part2.md"):
+        name, origins = _classify_bundle(title, registry)
+        assert name == "NLM_MCP_Archive"
+        assert origins == ["/abs/v2.md", "/abs/v3.md"]
+
+
+def test_classify_bundle_part_fp_guard(tmp_path: Path) -> None:
+    """`_partN` 형식이어도 name 이 registry 미등록이면 기각 (loose regex FP 차단)."""
+    reg_path = _write_bundle_registry(
+        tmp_path / "reg.json",
+        {"NLM_MCP_Archive": {"domain": "test", "files": ["/abs/v2.md"]}},
+    )
+    registry = load_bundle_registry(reg_path)
+    name, origins = _classify_bundle("my_special_part1.md", registry)
+    assert name is None
+    assert origins == []
+
+
 def test_detect_drift_classifies_bundle(tmp_path: Path) -> None:
     """Bundle source → matched_bundle, 기존 matched/missing 비건드림."""
     reg_path = _write_bundle_registry(

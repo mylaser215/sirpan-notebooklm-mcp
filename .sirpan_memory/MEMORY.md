@@ -4,9 +4,10 @@
 - 세션아카이브: `000-시스템/070-세션로그/notebooklm-mcp_세션아카이브.md`
 - 타임라인: `000-시스템/070-세션로그/notebooklm-mcp_작업타임라인.md`
 
-## 현재 상태 (260601-세션57·upstream v0.6.13 톱3 수동 포팅)
+## 현재 상태 (260630-세션62·NLM RPC timeout 픽스 + generate_code_md .json)
 - **NotebookLM MCP v0.5.23+** — Python/uv/FastMCP, 포트 9472
 - GitHub: mylaser215/sirpan-notebooklm-mcp (fork from jacob-bd/notebooklm-mcp-cli)
+- ✅ **세션62 완료** (260630): NLM RPC read timeout 30→180s 픽스(172소스 노트북 정상화 — git 회귀 아닌 데이터측 페이로드 비대 + 고정 `timeout=30.0`) + `generate_code_md` `.json` 구조추출 지원(B①). 회귀 +8 (timeout `test_read_timeout` 4 / json 4) 969→**1003 PASS**. B②(chunking, NLM ●●● 설계 확정 conv `803fdca1` — 파일분할+sync_bundle 1:N)·A(packaging editable 우회 근본수정) 100% 핸드오프 박제. env 신규 `NOTEBOOKLM_READ_TIMEOUT`. commit `0998af2`·`55f386d`·`e838916`
 - ✅ **세션57 완료** (260601): upstream v0.6.13 톱3 수동 포팅 — 배치교차삼단시공 4 commit. 보안 3종(TOCTOU `core/auth.py`·`utils/cdp.py` + redaction `core/base.py`·`core/conversation.py` + external-bind `mcp/server.py` `_env_bool` fail-close) + code 3/9 reconcile (`core/sources.py`·`core/research.py`) + 세션342 가드 융합 (`SOURCE_LIMIT_GUARD=290`) + utf-8 13곳. 회귀 +33 신설 (`test_server_bind` 19 / `test_auth_toctou` 7 / `test_base_debug_redaction` 5 / `test_source_reconciliation` 16 / `test_research_import_reconcile` 5 / 기타 5) 936→**969 PASS** Green. NLM Phase 4-A 3축 ●●● 완벽 (놓친 SSOT 0). 환경변수 신규: `NOTEBOOKLM_ALLOW_EXTERNAL_BIND` / `NOTEBOOKLM_SOURCE_LIMIT_GUARD`
 - ✅ **세션56 완료** (260601): Layer 3 백그라운드 자동 갱신 옵션 A + Q4 데드락 가드 시공 — 단교차삼단시공 풀오토 (NLM 핑퐁 2회 conv `21df4678`). 글로벌 CLAUDE.md 박제 2건. `core/base.py` 데드락 가드 (`HEADLESS_AUTH_DEADLOCK_TIMEOUT_SEC=60s`). 회귀 가드 6건 신설
 - 🎓 **세션52 완료** (260528): v7 V4 졸업 — `flag: focus → done-keep`, `milestone: 1기획 → 4마무리`, `due: 2026-05-28`. PAM 자동 이동 500-지식정원. 관련문서 감사 (group=sirpan개선) 깔끔
@@ -17,9 +18,10 @@
 - ✅ **세션45 완료** (260521): ATOM-2 시공 — `detect_drift` MCP tool화. 880 PASS
 - ✅ **묶음D 완료** (세션43): `replace_source_file(atomic=True)` + `add_file(auto_wrap_to_md=True)` opt-in
 - ✅ **v6 졸업** (세션36): NLM동기화 정책 대전환 10건
-- 회귀 영구 가드: v4 1건 + v5 9건 + Q5 12건 + refresh_auth 5건 + ATOM-1·2 8건 + research_import 7건 + v7 4건 + 세션56 데드락 6건 + 세션57 보안·reconcile 33건 = **85건+** Green
+- 회귀 영구 가드: v4 1건 + v5 9건 + Q5 12건 + refresh_auth 5건 + ATOM-1·2 8건 + research_import 7건 + v7 4건 + 세션56 데드락 6건 + 세션57 보안·reconcile 33건 + 세션62 timeout·json 8건 = **93건+** Green
 
 ## 허브 추적
+- [[NotebookLM MCP 안정화 프로젝트 (v8 — RPC timeout 픽스 + 번들 chunking 설계 + 핸드오프 유실 P0)]] 🆕 진행 (260701 — 세션62 100% 맥락 핸드오프 SSOT, 100-인박스, 잔여 7건: B②/A/B③/세션번호/★P0/__포인터/add-timeout)
 - [[NotebookLM MCP 안정화 프로젝트 (v7 — detect_drift 결정론 매칭 전환)]] 💎 done-keep (260528 졸업)
 - [[NotebookLM MCP 안정화 프로젝트 (v6 — 동기화 정책 대전환·파일 종류별 분기·md 래핑 도구화)]] 💎 done-keep
 - [[NotebookLM MCP 안정화 프로젝트 (v5 — RPC payload 도메인 통합 정렬)]] 💎 done-keep

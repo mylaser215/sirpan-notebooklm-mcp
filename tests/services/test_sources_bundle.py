@@ -119,6 +119,85 @@ def test_sync_bundle_replace_existing(
 
 
 # ---------------------------------------------------------------------------
+# 1:N chunking (Full-Sync: multipart add + stale part deletion)
+# ---------------------------------------------------------------------------
+
+@pytest.fixture
+def registry_path_maxwords(tmp_path: Path, origin_files: list[Path]) -> Path:
+    """Registry whose max_words=1 forces one part per origin file (2 parts)."""
+    reg = tmp_path / "reg_mw.json"
+    reg.write_text(
+        json.dumps(
+            {
+                "_version": "1.0",
+                "bundles": {
+                    "Test_Bundle": {
+                        "domain": "test",
+                        "files": [str(p) for p in origin_files],
+                        "max_words": 1,
+                    }
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    return reg
+
+
+def test_sync_bundle_multipart_add(
+    mock_client: MagicMock, registry_path_maxwords: Path
+) -> None:
+    """max_words=1 → 2 parts, both new → add ×2; parts/source_ids reflect split."""
+    mock_client.get_notebook_sources_with_types.return_value = []
+    mock_client.add_file.return_value = {"id": "new-id", "title": "Test_Bundle_part1.md"}
+
+    result = sync_bundle(
+        mock_client,
+        "nb1",
+        "Test_Bundle",
+        registry_path=registry_path_maxwords,
+        bundle_tool_script=_bundle_tool_script(),
+        python_executable=sys.executable,
+    )
+
+    assert result["mode"] == "add"
+    assert result["parts"] == 2
+    assert len(result["source_ids"]) == 2
+    assert result["source_id"] == "new-id"
+    assert mock_client.add_file.call_count == 2
+    mock_client.delete_source.assert_not_called()
+
+
+def test_sync_bundle_stale_part_deleted(
+    mock_client: MagicMock, registry_path_maxwords: Path
+) -> None:
+    """3 existing parts, only 2 regenerated → stale part3 deleted (DELETE-last)."""
+    mock_client.get_notebook_sources_with_types.return_value = [
+        {"id": "p1", "title": "Test_Bundle_part1.md", "source_type_name": "generated_text"},
+        {"id": "p2", "title": "Test_Bundle_part2.md", "source_type_name": "generated_text"},
+        {"id": "p3-stale", "title": "Test_Bundle_part3.md", "source_type_name": "generated_text"},
+    ]
+    mock_client.add_file.return_value = {"id": "new-id", "title": "Test_Bundle_part1.md"}
+    mock_client.delete_source.return_value = True
+    mock_client.list_notes.return_value = []
+
+    result = sync_bundle(
+        mock_client,
+        "nb1",
+        "Test_Bundle",
+        registry_path=registry_path_maxwords,
+        bundle_tool_script=_bundle_tool_script(),
+        python_executable=sys.executable,
+    )
+
+    assert result["parts"] == 2
+    assert result["mode"] == "replace"
+    # The stale part3 must have been deleted (its source_id appears in a delete call).
+    deleted_ids = [c.args[0] for c in mock_client.delete_source.call_args_list]
+    assert "p3-stale" in deleted_ids
+
+
+# ---------------------------------------------------------------------------
 # Fail-close: pre-flight validation
 # ---------------------------------------------------------------------------
 

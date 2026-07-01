@@ -1,5 +1,6 @@
 """Sources service — shared validation and logic for source management."""
 
+import json
 import subprocess
 import sys
 import tempfile
@@ -1036,13 +1037,20 @@ def _do_add(
 
 
 class SyncBundleResult(TypedDict):
-    """Result of sync_bundle: build local N-file bundle + upload as one NLM source."""
+    """Result of sync_bundle: build local N-file bundle(s) + Full-Sync to NLM.
+
+    ``source_ids`` holds every resulting part source (length 1 when unsplit);
+    ``source_id`` is the first for back-compat. ``parts`` is the rendered part
+    count. ``mode`` reflects the first part's dispatch (add/replace).
+    """
 
     notebook_id: str
     bundle_name: str
     source_id: str
+    source_ids: list[str]
     title: str
     mode: Literal["add", "replace"]
+    parts: int
     bundled_count: int
     message: str
 
@@ -1051,6 +1059,11 @@ class SyncBundleResult(TypedDict):
 _BUNDLE_TOOL_SCRIPT = (
     Path(__file__).resolve().parents[3] / "scripts" / "generate_bundle_md.py"
 )
+
+# Default chunking threshold (words) — mirrors DEFAULT_BUNDLE_MAX_WORDS in
+# scripts/generate_bundle_md.py. Parser-timeout defense, not a hard NLM cap.
+# A registry entry may override via its ``max_words`` key.
+_DEFAULT_BUNDLE_MAX_WORDS = 200_000
 
 
 def sync_bundle(
@@ -1126,7 +1139,7 @@ def sync_bundle(
             hint=f"First missing: {missing_origins[0]}",
         )
 
-    # 3. Bundle build (temp dir; auto-cleanup on exit)
+    # 3. Bundle build (temp dir; auto-cleanup on exit) — 1:N chunking Full-Sync.
     script = bundle_tool_script or _BUNDLE_TOOL_SCRIPT
     if not script.exists():
         raise ServiceError(
@@ -1135,19 +1148,23 @@ def sync_bundle(
             hint="Verify the sirpan-notebooklm-mcp repo layout (scripts/generate_bundle_md.py).",
         )
     py = python_executable or sys.executable
-    title = f"{bundle_name}.md"
+    max_words = bundle.get("max_words")
+    if not isinstance(max_words, int) or max_words <= 0:
+        max_words = _DEFAULT_BUNDLE_MAX_WORDS
+    output_stub = f"{bundle_name}.md"
 
     with tempfile.TemporaryDirectory(prefix="nlm-sync-bundle-") as tmpdir:
-        bundle_path = Path(tmpdir) / title
         cmd = [
             py,
             str(script),
             "--files",
             *[str(p) for p in abs_files],
             "--output",
-            str(bundle_path),
+            str(Path(tmpdir) / output_stub),
             "--bundle-name",
             bundle_name,
+            "--max-words",
+            str(max_words),
         ]
         proc = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8")
         if proc.returncode != 0:
@@ -1155,55 +1172,83 @@ def sync_bundle(
                 f"Bundle build failed (exit {proc.returncode}): {proc.stderr.strip()}",
                 user_message="Bundle generation failed; original NLM source unchanged.",
             )
+        # Parse the JSON part manifest (single-line stdout contract, --max-words).
+        try:
+            payload = json.loads(proc.stdout.strip())
+            part_paths = [Path(p) for p in payload["parts"]]
+        except (json.JSONDecodeError, KeyError, TypeError) as e:
+            raise ServiceError(
+                f"Bundle tool returned malformed output: {proc.stdout!r}",
+                user_message="Bundle generation output could not be parsed.",
+            ) from e
+        if not part_paths:
+            raise ServiceError(
+                "Bundle tool produced no parts",
+                user_message="Bundle generation yielded nothing.",
+            )
+        generated_titles = {p.name for p in part_paths}
 
-        # 4. Lookup existing bundle source by title (best-effort)
-        existing_id: str | None = None
+        # 4. Snapshot existing NLM sources for this bundle name — the single
+        #    `{name}.md` and every `{name}_part…`. Best-effort (fresh-add on error).
+        existing: dict[str, str] = {}  # title -> source_id
         try:
             for src in client.get_notebook_sources_with_types(notebook_id):
-                if src.get("title") == title:
-                    existing_id = src.get("id") if isinstance(src.get("id"), str) else None
-                    break
+                t = src.get("title")
+                sid = src.get("id")
+                if not isinstance(t, str) or not isinstance(sid, str):
+                    continue
+                if t == output_stub or t.startswith(f"{bundle_name}_part"):
+                    existing[t] = sid
         except Exception:
-            pass  # treat as "no existing source"; add path is taken below
+            existing = {}
 
-        # 5. Replace (atomic) or add
-        if existing_id:
-            replace_res = replace_source_file(
-                client,
-                notebook_id,
-                existing_id,
-                str(bundle_path),
-                atomic=True,
-            )
-            return {
-                "notebook_id": notebook_id,
-                "bundle_name": bundle_name,
-                "source_id": replace_res["new_source_id"],
-                "title": replace_res["title"],
-                "mode": "replace",
-                "bundled_count": len(abs_files),
-                "message": (
-                    f"Replaced bundle '{bundle_name}' ({len(abs_files)} files) "
-                    f"as source {replace_res['new_source_id']}"
-                ),
-            }
+        # 5. ADD/REPLACE every generated part FIRST (knowledge secured),
+        #    then DELETE stale parts LAST — zero knowledge gap (NLM 반론2).
+        source_ids: list[str] = []
+        first_mode: Literal["add", "replace"] = "add"
+        for i, part_path in enumerate(part_paths):
+            part_title = part_path.name
+            if part_title in existing:
+                res = replace_source_file(
+                    client,
+                    notebook_id,
+                    existing[part_title],
+                    str(part_path),
+                    atomic=True,
+                )
+                sid = res["new_source_id"]
+                mode: Literal["add", "replace"] = "replace"
+            else:
+                res = add_source(
+                    client,
+                    notebook_id,
+                    "file",
+                    file_path=str(part_path),
+                    title=part_title,
+                )
+                sid = res["source_id"]
+                mode = "add"
+            source_ids.append(sid)
+            if i == 0:
+                first_mode = mode
 
-        add_res = add_source(
-            client,
-            notebook_id,
-            "file",
-            file_path=str(bundle_path),
-            title=title,
-        )
+        # 6. Delete stale parts no longer produced (Full-Sync, DELETE-last).
+        stale = [(t, sid) for t, sid in existing.items() if t not in generated_titles]
+        for _t, sid in stale:
+            delete_source(client, sid, notebook_id=notebook_id)
+
+        parts = len(part_paths)
         return {
             "notebook_id": notebook_id,
             "bundle_name": bundle_name,
-            "source_id": add_res["source_id"],
-            "title": add_res["title"],
-            "mode": "add",
+            "source_id": source_ids[0],
+            "source_ids": source_ids,
+            "title": output_stub if parts == 1 else f"{bundle_name}_part1.md",
+            "mode": first_mode,
+            "parts": parts,
             "bundled_count": len(abs_files),
             "message": (
-                f"Added bundle '{bundle_name}' ({len(abs_files)} files) "
-                f"as new source {add_res['source_id']}"
+                f"Synced bundle '{bundle_name}' ({len(abs_files)} files → {parts} part(s)): "
+                f"{len(source_ids)} source(s), {len(stale)} stale removed"
             ),
         }
