@@ -10,7 +10,11 @@ from typing import Any, Literal, TypedDict
 
 from ..core.client import NotebookLMClient
 from .errors import ServiceError, ValidationError
-from .sync_helpers import load_bundle_registry
+from .sync_helpers import (
+    _should_skip_bundle_upload,
+    get_vault_root,
+    load_bundle_registry,
+)
 
 VALID_SOURCE_TYPES = ("url", "text", "drive", "file")
 VALID_DRIVE_DOC_TYPES = ("doc", "slides", "sheets", "pdf")
@@ -1049,7 +1053,7 @@ class SyncBundleResult(TypedDict):
     source_id: str
     source_ids: list[str]
     title: str
-    mode: Literal["add", "replace"]
+    mode: Literal["add", "replace", "skip"]
     parts: int
     bundled_count: int
     message: str
@@ -1065,7 +1069,8 @@ _BUNDLE_TOOL_SCRIPT = (
 # Default chunking threshold (words) — mirrors DEFAULT_BUNDLE_MAX_WORDS in
 # scripts/generate_bundle_md.py. Parser-timeout defense, not a hard NLM cap.
 # A registry entry may override via its ``max_words`` key.
-_DEFAULT_BUNDLE_MAX_WORDS = 200_000
+# v10: 200k→100k — 234초 spike(마크다운 파서 timeout) 이중 방어 (conv 803fdca1).
+_DEFAULT_BUNDLE_MAX_WORDS = 100_000
 
 
 def sync_bundle(
@@ -1140,6 +1145,25 @@ def sync_bundle(
             ),
             hint=f"First missing: {missing_origins[0]}",
         )
+
+    # 2.5 git churn skip (v10 I/O 병목) — 원본이 앵커 이후 변경 없으면 가장 무거운
+    #     bundle 렌더(subprocess) + NLM 조회/업로드를 원천 회피. origin 존재
+    #     확인(fail-close) *뒤*에 두어 깨진 경로 은폐를 막는다 (NLM Q1 ●●●).
+    if _should_skip_bundle_upload(get_vault_root(), abs_files):
+        return {
+            "notebook_id": notebook_id,
+            "bundle_name": bundle_name,
+            "source_id": "",
+            "source_ids": [],
+            "title": f"{bundle_name}.md",
+            "mode": "skip",
+            "parts": 0,
+            "bundled_count": len(abs_files),
+            "message": (
+                f"Bundle '{bundle_name}' skipped — "
+                "no origin changes since last NLM sync anchor."
+            ),
+        }
 
     # 3. Bundle build (temp dir; auto-cleanup on exit) — 1:N chunking Full-Sync.
     script = bundle_tool_script or _BUNDLE_TOOL_SCRIPT

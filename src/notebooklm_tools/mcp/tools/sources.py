@@ -372,8 +372,8 @@ def sync_bundle(
         notebook_id: Notebook UUID where the bundle source lives.
         bundle_name: Bundle key registered in nlm_bundle_registry.json.
 
-    Returns: notebook_id, bundle_name, source_id, title, mode ("add"|"replace"),
-        bundled_count (int), message (str).
+    Returns: notebook_id, bundle_name, source_id, title,
+        mode ("add"|"replace"|"skip"), bundled_count (int), message (str).
     """
     try:
         client = get_client()

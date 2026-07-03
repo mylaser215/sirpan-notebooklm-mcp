@@ -46,9 +46,10 @@ from pathlib import Path
 
 GENERATOR_NAME = "scripts/generate_bundle_md.py"
 
-# NLM Pro 소스당 한도 50만 단어의 ~40% — word 여유가 아니라 마크다운 파서
+# NLM Pro 소스당 한도 50만 단어의 ~20% — word 여유가 아니라 마크다운 파서
 # timeout 방어가 목적 (세션62 RPC read timeout 계열). conv 803fdca1 ●●●.
-DEFAULT_BUNDLE_MAX_WORDS = 200_000
+# v10: 200k→100k — 234초 spike 이중 방어 (services/sources.py 상수와 미러).
+DEFAULT_BUNDLE_MAX_WORDS = 100_000
 
 FENCE_LANG: dict[str, str] = {
     ".py": "python",

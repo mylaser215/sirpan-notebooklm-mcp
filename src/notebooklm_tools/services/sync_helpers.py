@@ -14,6 +14,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import subprocess
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any, TypedDict
@@ -26,6 +27,53 @@ def get_vault_root() -> Path:
     """SIRPAN_VAULT 환경변수 우선, 없으면 기본값."""
     env = os.environ.get("SIRPAN_VAULT")
     return Path(env) if env else _DEFAULT_VAULT
+
+
+# NLM동기화 앵커 (커밋 해시). CLAUDE.md NLM동기화 절 ⑤와 동일 경로 SSOT.
+_NLM_SYNC_ANCHOR_REL = "000-시스템/050-Docs/.last_nlm_sync"
+
+
+def _should_skip_bundle_upload(vault_root: Path, bundle_files: list[Path]) -> bool:
+    """번들 원본이 마지막 NLM동기화 앵커 이후 git 변경이 없으면 True(업로드 skip).
+
+    v10 I/O 병목 최적화 — 변경 없는 Tier 2 번들은 무거운 bundle 렌더(subprocess)
+    + NLM source 조회/업로드를 원천 회피. 호출자(``sync_bundle``)는 Pre-flight
+    origin 존재 확인 *직후*, bundle build *직전*에 호출한다.
+
+    **Fail-safe 우선** — 아래 모든 불확실 상황은 ``False`` (변경 있다고 간주 =
+    업로드) 반환:
+    - ``bundle_files`` 빈 리스트 → ``git diff … --`` 뒤 경로 없으면 볼트 전체
+      스캔 (Empty List 덫, 세션409 NLM 7차 ●●●).
+    - 앵커 파일 부재/빈값 (첫 동기화 등).
+    - git 실행 실패 또는 ``returncode != 0`` (무효 앵커 등).
+
+    경로는 ``os.path.relpath``로 볼트 상대경로 변환 (절대경로면 git 0건 반환).
+    Windows 백슬래시 relpath는 git이 정상 처리 (세션409 dry-run 실측) — posix
+    변환 불필요.
+    """
+    if not bundle_files:
+        return False
+    anchor_file = vault_root / _NLM_SYNC_ANCHOR_REL
+    try:
+        anchor = anchor_file.read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    if not anchor:
+        return False
+    rel = [os.path.relpath(str(Path(f)), str(vault_root)) for f in bundle_files]
+    try:
+        proc = subprocess.run(
+            ["git", "diff", "--name-only", anchor, "--", *rel],
+            cwd=str(vault_root),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if proc.returncode != 0:
+        return False
+    return not proc.stdout.strip()
 
 
 SKIP_DIRS: frozenset[str] = frozenset(

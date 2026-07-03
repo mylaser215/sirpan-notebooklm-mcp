@@ -15,8 +15,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from notebooklm_tools.services import sources as sources_service
+from notebooklm_tools.services import sync_helpers
 from notebooklm_tools.services.errors import ServiceError, ValidationError
 from notebooklm_tools.services.sources import sync_bundle
+from notebooklm_tools.services.sync_helpers import _should_skip_bundle_upload
 
 
 @pytest.fixture
@@ -308,3 +310,93 @@ def test_sync_bundle_exported() -> None:
     """sync_bundle is importable from the sources service module."""
     assert hasattr(sources_service, "sync_bundle")
     assert callable(sources_service.sync_bundle)
+
+
+# ---------------------------------------------------------------------------
+# v10 git churn skip — _should_skip_bundle_upload (세션409)
+# ---------------------------------------------------------------------------
+
+class _FakeProc:
+    """Minimal stand-in for subprocess.CompletedProcess."""
+
+    def __init__(self, returncode: int, stdout: str) -> None:
+        self.returncode = returncode
+        self.stdout = stdout
+
+
+@pytest.fixture
+def vault_with_anchor(tmp_path: Path) -> Path:
+    """Vault root holding a valid .last_nlm_sync anchor (한글 경로 포함)."""
+    anchor_dir = tmp_path / "000-시스템" / "050-Docs"
+    anchor_dir.mkdir(parents=True)
+    (anchor_dir / ".last_nlm_sync").write_text("deadbeef", encoding="utf-8")
+    return tmp_path
+
+
+def test_skip_when_no_changes(
+    vault_with_anchor: Path, origin_files: list[Path], monkeypatch
+) -> None:
+    """앵커 존재 + git diff 빈 stdout → skip=True (업로드 회피)."""
+    monkeypatch.setattr(
+        sync_helpers.subprocess, "run", lambda *a, **k: _FakeProc(0, "")
+    )
+    assert _should_skip_bundle_upload(vault_with_anchor, origin_files) is True
+
+
+def test_no_skip_when_changed(
+    vault_with_anchor: Path, origin_files: list[Path], monkeypatch
+) -> None:
+    """git diff가 변경 파일을 반환 → skip=False (업로드)."""
+    monkeypatch.setattr(
+        sync_helpers.subprocess,
+        "run",
+        lambda *a, **k: _FakeProc(0, "500-지식정원/origin_a.md\n"),
+    )
+    assert _should_skip_bundle_upload(vault_with_anchor, origin_files) is False
+
+
+def test_failsafe_missing_anchor(
+    tmp_path: Path, origin_files: list[Path]
+) -> None:
+    """앵커 파일 부재 (첫 동기화 등) → False (fail-safe 업로드)."""
+    assert _should_skip_bundle_upload(tmp_path, origin_files) is False
+
+
+def test_failsafe_git_error(
+    vault_with_anchor: Path, origin_files: list[Path], monkeypatch
+) -> None:
+    """git returncode != 0 (무효 앵커 등) → False (fail-safe 업로드)."""
+    monkeypatch.setattr(
+        sync_helpers.subprocess, "run", lambda *a, **k: _FakeProc(128, "")
+    )
+    assert _should_skip_bundle_upload(vault_with_anchor, origin_files) is False
+
+
+def test_failsafe_empty_files(vault_with_anchor: Path) -> None:
+    """빈 파일 목록 → False (Empty List 덫 방어: `git diff --` 뒤 빈 경로=전체 스캔)."""
+    assert _should_skip_bundle_upload(vault_with_anchor, []) is False
+
+
+def test_sync_bundle_skips_when_unchanged(
+    mock_client: MagicMock, registry_path: Path, monkeypatch
+) -> None:
+    """skip 판정 True → mode=='skip', NLM 전혀 안 건드림 (조회·업로드 0)."""
+    monkeypatch.setattr(
+        sources_service, "_should_skip_bundle_upload", lambda *a, **k: True
+    )
+    result = sync_bundle(
+        mock_client,
+        "nb1",
+        "Test_Bundle",
+        registry_path=registry_path,
+        bundle_tool_script=_bundle_tool_script(),
+        python_executable=sys.executable,
+    )
+    assert result["mode"] == "skip"
+    assert result["parts"] == 0
+    assert result["source_id"] == ""
+    assert result["source_ids"] == []
+    assert result["bundled_count"] == 2
+    mock_client.add_file.assert_not_called()
+    mock_client.get_notebook_sources_with_types.assert_not_called()
+    mock_client.delete_source.assert_not_called()
