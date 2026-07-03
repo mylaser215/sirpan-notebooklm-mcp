@@ -348,9 +348,9 @@ def replace_source_file_cmd(
         help="Route unsupported extensions to a text upload (UTF-8 only).",
     ),
     atomic: bool = typer.Option(
-        False,
-        "--atomic",
-        help="ADD before DELETE so ADD failure preserves the original source (opt-in trial).",
+        True,
+        "--atomic/--no-atomic",
+        help="ADD before DELETE so ADD failure preserves the original source (default; --no-atomic for legacy delete-first).",
     ),
     profile: str | None = typer.Option(None, "--profile", "-p", help="Profile to use"),
 ) -> None:
@@ -363,13 +363,14 @@ def replace_source_file_cmd(
     Pass ``--fallback-to-text`` to route unsupported extensions (e.g.
     ``.json``, ``.py``) to a text-mode upload (UTF-8 only).
 
-    Pass ``--atomic`` to swap to add-first ordering (ADD failure leaves the
-    original source intact — closes the session-330 data-loss window).
+    Add-first ordering is the default (ADD failure leaves the original source
+    intact — closes the session-330/393 data-loss window). Pass ``--no-atomic``
+    for the legacy delete-first behavior (not recommended).
 
     Example:
         nlm source replace-file <notebook-id> <source-id> ./new.md --confirm
         nlm source replace-file <notebook-id> <source-id> ./settings.json --confirm --fallback-to-text
-        nlm source replace-file <notebook-id> <source-id> ./CLAUDE.md --confirm --atomic
+        nlm source replace-file <notebook-id> <source-id> ./CLAUDE.md --confirm --no-atomic
     """
     notebook_id = get_alias_manager().resolve(notebook_id)
     source_id = get_alias_manager().resolve(source_id)

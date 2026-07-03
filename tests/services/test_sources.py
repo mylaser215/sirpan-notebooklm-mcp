@@ -561,7 +561,8 @@ class TestRenameSourceRouting:
 class TestReplaceSourceFile:
     """Test replace_source_file service function."""
 
-    def test_happy_path_delete_then_add(self, mock_client, tmp_path):
+    def test_legacy_delete_then_add_order(self, mock_client, tmp_path):
+        """atomic=False (legacy opt-out) → delete-first 순서 유지 (회귀 가드)."""
         file_path = tmp_path / "doc.txt"
         file_path.write_text("hello world")
 
@@ -577,7 +578,9 @@ class TestReplaceSourceFile:
             call_order.append("add") or {"id": "src-new", "title": "doc.txt"}
         )
 
-        result = replace_source_file(mock_client, "nb-1", "src-old", str(file_path))
+        result = replace_source_file(
+            mock_client, "nb-1", "src-old", str(file_path), atomic=False
+        )
 
         assert call_order == ["delete", "add"]
         assert result["notebook_id"] == "nb-1"
@@ -627,6 +630,7 @@ class TestReplaceSourceFile:
         mock_client.add_file.assert_not_called()
 
     def test_delete_success_add_failure_surfaces_explicitly(self, mock_client, tmp_path):
+        """legacy(atomic=False) delete 성공 + add 실패 → 원본 소실 명시 에러."""
         file_path = tmp_path / "doc.txt"
         file_path.write_text("content")
 
@@ -635,7 +639,9 @@ class TestReplaceSourceFile:
         mock_client.add_file.side_effect = RuntimeError("upload network error")
 
         with pytest.raises(ServiceError, match="delete succeeded but add failed"):
-            replace_source_file(mock_client, "nb-1", "src-old", str(file_path))
+            replace_source_file(
+                mock_client, "nb-1", "src-old", str(file_path), atomic=False
+            )
 
         # delete was called exactly once before the add failure
         assert mock_client.delete_source.call_count == 1
@@ -719,7 +725,7 @@ class TestReplaceSourceFile:
         mock_client.add_text_source.assert_not_called()
 
     def test_fallback_delete_success_add_text_failure_surfaces(self, mock_client, tmp_path):
-        """폴백 모드 delete 성공 + add_text 실패 → 명시적 ServiceError (atomic 일관)."""
+        """legacy(atomic=False) 폴백 모드 delete 성공 + add_text 실패 → 명시적 ServiceError."""
         file_path = tmp_path / "settings.json"
         file_path.write_text('{"k": 1}', encoding="utf-8")
 
@@ -729,7 +735,8 @@ class TestReplaceSourceFile:
 
         with pytest.raises(ServiceError, match="delete succeeded but add failed"):
             replace_source_file(
-                mock_client, "nb-1", "src-old", str(file_path), fallback_to_text=True
+                mock_client, "nb-1", "src-old", str(file_path),
+                fallback_to_text=True, atomic=False,
             )
 
         # delete was called exactly once before the add_text failure
@@ -780,8 +787,8 @@ class TestReplaceSourceFile:
         # Load-bearing: delete must NEVER fire when atomic add fails
         mock_client.delete_source.assert_not_called()
 
-    def test_atomic_default_is_legacy_delete_first(self, mock_client, tmp_path):
-        """atomic 미지정 → 기존 delete-first 흐름 유지 (회귀 가드)."""
+    def test_atomic_default_is_add_first(self, mock_client, tmp_path):
+        """atomic 미지정 → default add-first 흐름 (v10 승격, Fail-close 회귀 가드)."""
         file_path = tmp_path / "doc.txt"
         file_path.write_text("content")
 
@@ -797,9 +804,9 @@ class TestReplaceSourceFile:
 
         result = replace_source_file(mock_client, "nb-1", "src-old", str(file_path))
 
-        # Legacy ordering preserved
-        assert call_order == ["delete", "add"]
-        assert "atomic" not in result["message"]
+        # Default promoted to ADD-first (data-loss defense)
+        assert call_order == ["add", "delete"]
+        assert "atomic" in result["message"]
 
     def test_atomic_add_success_delete_failure_surfaces(self, mock_client, tmp_path):
         """atomic=True + add 성공 + delete 실패 → 새 source 살아있음 + ServiceError."""

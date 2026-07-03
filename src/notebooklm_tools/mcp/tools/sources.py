@@ -243,7 +243,7 @@ def source_replace_file(
     file_path: str,
     confirm: bool = False,
     fallback_to_text: bool = False,
-    atomic: bool = False,
+    atomic: bool = True,
 ) -> ResultDict:
     """Replace an existing source by deleting it and uploading a new local file.
 
@@ -262,9 +262,10 @@ def source_replace_file(
     strict-extension behavior. The response ``mode`` field reports which
     path was taken (``"file"`` or ``"text"``).
 
-    When ``atomic=True``, ADD runs before DELETE so an ADD failure leaves
-    the original source intact (no data loss). Default ``False`` keeps the
-    legacy delete-first behavior — opt-in trial mode.
+    ``atomic=True`` (default) runs ADD before DELETE so an ADD failure leaves
+    the original source intact (no data loss). Pass ``atomic=False`` for the
+    legacy delete-first behavior (not recommended — an ADD failure permanently
+    loses the source; see sessions 330/393).
 
     Args:
         notebook_id: Notebook UUID containing the source
@@ -274,8 +275,9 @@ def source_replace_file(
             the old source is deleted before the new file is uploaded)
         fallback_to_text: Opt-in — route unsupported extensions to a text
             upload (UTF-8 only). Default ``False``.
-        atomic: Opt-in — perform ADD before DELETE so ADD failure preserves
-            the original source. Default ``False`` (legacy delete-first).
+        atomic: Perform ADD before DELETE so ADD failure preserves the
+            original source. Default ``True`` (Fail-close). Set ``False`` for
+            legacy delete-first (not recommended).
     """
     if not confirm:
         return error_result(

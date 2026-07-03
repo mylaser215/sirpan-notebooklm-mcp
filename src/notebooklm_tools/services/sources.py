@@ -819,7 +819,7 @@ def replace_source_file(
     file_path: str,
     *,
     fallback_to_text: bool = False,
-    atomic: bool = False,
+    atomic: bool = True,
 ) -> ReplaceSourceFileResult:
     """Replace an existing source by deleting it and uploading a new local file.
 
@@ -838,13 +838,15 @@ def replace_source_file(
     failure surfaces as ``ValidationError`` *before* the delete step (pre-delete
     safety). Default ``False`` preserves the original strict-extension behavior.
 
-    When ``atomic=True``, the order is reversed: ADD first, and only on success
-    is the old source DELETED. ADD failure leaves the original source intact,
-    closing the "delete succeeded but add failed" data-loss window observed in
-    session 330 (``~/.claude/CLAUDE.md`` source 분실 사고). ``atomic=False``
-    (default) preserves the legacy delete-first behavior — opt-in trial mode
-    until NLM Eventual Consistency / Ghost ID patterns (session 37) are fully
-    characterized for the brief same-file-twice window atomic mode opens.
+    ``atomic=True`` (default) uses ADD-first ordering: ADD first, and only on
+    success is the old source DELETED. ADD failure leaves the original source
+    intact, closing the "delete succeeded but add failed" data-loss window
+    observed in session 330 (``~/.claude/CLAUDE.md`` source 분실 사고) and
+    session 393 (``__시스템맵.md`` 일시 분실). Promoted to default in the v10
+    track — the session 37 Ghost ID / Eventual Consistency concern was ruled a
+    theoretical non-issue (그것은 병렬 ADD 폭격 시에만 발생; atomic replace is
+    synchronous serial). Pass ``atomic=False`` for the legacy delete-first
+    behavior (not recommended — an ADD failure permanently loses the source).
 
     Args:
         client: Authenticated NotebookLM client
