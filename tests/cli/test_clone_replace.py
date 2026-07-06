@@ -144,14 +144,16 @@ class TestSourceReplaceFileCli:
         ):
             r = runner.invoke(
                 source_app,
-                ["replace-file", "nb-1", "src-old", str(file_path), "--confirm"],
+                ["replace-file", "nb-1", str(file_path), "--source-id", "src-old", "--confirm"],
             )
 
         assert r.exit_code == 0
         replace_mock.assert_called_once()
         args = replace_mock.call_args.args
-        # call: replace_source_file(client, notebook_id, source_id, file_path)
-        assert args[1:] == ("nb-1", "src-old", str(file_path))
+        kwargs = replace_mock.call_args.kwargs
+        # call: replace_source_file(client, notebook_id, file_path, source_id=..., ...)
+        assert args[1:] == ("nb-1", str(file_path))
+        assert kwargs.get("source_id") == "src-old"
         assert "src-new" in r.stdout
 
     def test_replace_without_confirm_aborts(
@@ -175,7 +177,7 @@ class TestSourceReplaceFileCli:
             # Send "n" to the confirmation prompt
             r = runner.invoke(
                 source_app,
-                ["replace-file", "nb-1", "src-old", str(file_path)],
+                ["replace-file", "nb-1", str(file_path), "--source-id", "src-old"],
                 input="n\n",
             )
 

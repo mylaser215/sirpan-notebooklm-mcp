@@ -579,7 +579,7 @@ class TestReplaceSourceFile:
         )
 
         result = replace_source_file(
-            mock_client, "nb-1", "src-old", str(file_path), atomic=False
+            mock_client, "nb-1", str(file_path), source_id="src-old", atomic=False
         )
 
         assert call_order == ["delete", "add"]
@@ -599,9 +599,72 @@ class TestReplaceSourceFile:
         # Track that add_file was called with the preserved title metadata
         mock_client.add_file.return_value = {"id": "src-new", "title": "Original Title"}
 
-        result = replace_source_file(mock_client, "nb-1", "src-old", str(file_path))
+        result = replace_source_file(mock_client, "nb-1", str(file_path), source_id="src-old")
 
         assert result["title"] == "Original Title"
+
+    # --- source_id auto-match (session 418, NLM ●●● conv 803fdca1) ---------
+
+    def test_auto_match_by_basename_exact(self, mock_client, tmp_path):
+        """source_id 생략 → title==basename 정확일치로 자동 해소 (UUID 전사 제거)."""
+        file_path = tmp_path / "doc.txt"
+        file_path.write_text("content")
+
+        mock_client.get_notebook_sources_with_types.return_value = [
+            {"id": "src-other", "title": "other.txt", "source_type_name": "Text"},
+            {"id": "src-match", "title": "doc.txt", "source_type_name": "Text"},
+        ]
+        mock_client.add_file.return_value = {"id": "src-new", "title": "doc.txt"}
+
+        result = replace_source_file(mock_client, "nb-1", str(file_path))
+
+        assert result["old_source_id"] == "src-match"
+        assert result["new_source_id"] == "src-new"
+
+    def test_auto_match_by_basename_prefix_folder_tag(self, mock_client, tmp_path):
+        """보강일치 — NLM 자동 폴더태그 title(SKILL.md (two_step_solver))도 basename으로 매칭."""
+        file_path = tmp_path / "SKILL.md"
+        file_path.write_text("content")
+
+        mock_client.get_notebook_sources_with_types.return_value = [
+            {"id": "src-skill", "title": "SKILL.md (two_step_solver)", "source_type_name": "Text"},
+        ]
+        mock_client.add_file.return_value = {"id": "src-new", "title": "SKILL.md (two_step_solver)"}
+
+        result = replace_source_file(mock_client, "nb-1", str(file_path))
+
+        assert result["old_source_id"] == "src-skill"
+
+    def test_auto_match_ambiguous_raises_before_delete(self, mock_client, tmp_path):
+        """동일 basename 다수(ambiguous) → ValidationError, 파괴적 delete 미발동."""
+        file_path = tmp_path / "README.md"
+        file_path.write_text("content")
+
+        mock_client.get_notebook_sources_with_types.return_value = [
+            {"id": "r1", "title": "README.md", "source_type_name": "Text"},
+            {"id": "r2", "title": "README.md", "source_type_name": "Text"},
+        ]
+
+        with pytest.raises(ValidationError, match="auto-match"):
+            replace_source_file(mock_client, "nb-1", str(file_path))
+
+        # Load-bearing: no destructive/add call when auto-match is ambiguous
+        mock_client.delete_source.assert_not_called()
+        mock_client.add_file.assert_not_called()
+
+    def test_auto_match_fetch_failure_raises_service_error(self, mock_client, tmp_path):
+        """source_id=None인데 소스목록 조회 실패 → 묵음실패 금지, ServiceError (함정1)."""
+        file_path = tmp_path / "doc.txt"
+        file_path.write_text("content")
+
+        mock_client.get_notebook_sources_with_types.side_effect = RuntimeError("network down")
+
+        with pytest.raises(ServiceError, match="auto-match"):
+            replace_source_file(mock_client, "nb-1", str(file_path))
+
+        # Load-bearing: unresolved source must never reach the destructive path
+        mock_client.delete_source.assert_not_called()
+        mock_client.add_file.assert_not_called()
 
     @pytest.mark.parametrize(
         "scenario",
@@ -623,7 +686,7 @@ class TestReplaceSourceFile:
             bad_path.write_text("content")
 
         with pytest.raises(ValidationError):
-            replace_source_file(mock_client, "nb-1", "src-old", str(bad_path))
+            replace_source_file(mock_client, "nb-1", str(bad_path), source_id="src-old")
 
         # Load-bearing: delete must NEVER fire when pre-check fails
         mock_client.delete_source.assert_not_called()
@@ -640,7 +703,7 @@ class TestReplaceSourceFile:
 
         with pytest.raises(ServiceError, match="delete succeeded but add failed"):
             replace_source_file(
-                mock_client, "nb-1", "src-old", str(file_path), atomic=False
+                mock_client, "nb-1", str(file_path), source_id="src-old", atomic=False
             )
 
         # delete was called exactly once before the add failure
@@ -659,7 +722,7 @@ class TestReplaceSourceFile:
         mock_client.add_text_source.return_value = {"id": "src-new", "title": "settings.json"}
 
         result = replace_source_file(
-            mock_client, "nb-1", "src-old", str(file_path), fallback_to_text=True
+            mock_client, "nb-1", str(file_path), source_id="src-old", fallback_to_text=True
         )
 
         # add_text_source was called with the file contents
@@ -679,7 +742,7 @@ class TestReplaceSourceFile:
         file_path.write_text('{"key": "value"}', encoding="utf-8")
 
         with pytest.raises(ValidationError, match="Unsupported file type"):
-            replace_source_file(mock_client, "nb-1", "src-old", str(file_path))
+            replace_source_file(mock_client, "nb-1", str(file_path), source_id="src-old")
 
         # Load-bearing: no destructive call when pre-check fails
         mock_client.delete_source.assert_not_called()
@@ -700,7 +763,7 @@ class TestReplaceSourceFile:
         }
 
         result = replace_source_file(
-            mock_client, "nb-1", "src-old", str(file_path), fallback_to_text=True
+            mock_client, "nb-1", str(file_path), source_id="src-old", fallback_to_text=True
         )
 
         # add_text_source called with preserved title (positional arg index 2)
@@ -716,7 +779,7 @@ class TestReplaceSourceFile:
 
         with pytest.raises(ValidationError, match="Cannot decode as UTF-8"):
             replace_source_file(
-                mock_client, "nb-1", "src-old", str(bin_path), fallback_to_text=True
+                mock_client, "nb-1", str(bin_path), source_id="src-old", fallback_to_text=True
             )
 
         # Load-bearing: utf-8 decode failure must surface before delete
@@ -735,7 +798,7 @@ class TestReplaceSourceFile:
 
         with pytest.raises(ServiceError, match="delete succeeded but add failed"):
             replace_source_file(
-                mock_client, "nb-1", "src-old", str(file_path),
+                mock_client, "nb-1", str(file_path), source_id="src-old",
                 fallback_to_text=True, atomic=False,
             )
 
@@ -762,7 +825,7 @@ class TestReplaceSourceFile:
         )
 
         result = replace_source_file(
-            mock_client, "nb-1", "src-old", str(file_path), atomic=True
+            mock_client, "nb-1", str(file_path), source_id="src-old", atomic=True
         )
 
         assert call_order == ["add", "delete"]
@@ -781,7 +844,7 @@ class TestReplaceSourceFile:
             ServiceError, match="atomic.*add failed.*original source preserved"
         ):
             replace_source_file(
-                mock_client, "nb-1", "src-old", str(file_path), atomic=True
+                mock_client, "nb-1", str(file_path), source_id="src-old", atomic=True
             )
 
         # Load-bearing: delete must NEVER fire when atomic add fails
@@ -802,7 +865,7 @@ class TestReplaceSourceFile:
             call_order.append("add") or {"id": "src-new", "title": "doc.txt"}
         )
 
-        result = replace_source_file(mock_client, "nb-1", "src-old", str(file_path))
+        result = replace_source_file(mock_client, "nb-1", str(file_path), source_id="src-old")
 
         # Default promoted to ADD-first (data-loss defense)
         assert call_order == ["add", "delete"]
@@ -821,7 +884,7 @@ class TestReplaceSourceFile:
             ServiceError, match="atomic.*add succeeded but delete failed"
         ):
             replace_source_file(
-                mock_client, "nb-1", "src-old", str(file_path), atomic=True
+                mock_client, "nb-1", str(file_path), source_id="src-old", atomic=True
             )
 
         # add was called once; delete was attempted (failed) — both sources

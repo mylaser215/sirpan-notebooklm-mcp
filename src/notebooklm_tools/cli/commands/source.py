@@ -339,8 +339,13 @@ def delete_source(
 @app.command("replace-file")
 def replace_source_file_cmd(
     notebook_id: str = typer.Argument(..., help="Notebook ID containing the source"),
-    source_id: str = typer.Argument(..., help="Source ID to replace"),
     file_path: str = typer.Argument(..., help="Local file path to upload as replacement"),
+    source_id: str | None = typer.Option(
+        None,
+        "--source-id",
+        "-s",
+        help="Source ID to replace (optional — auto-matched by file basename if omitted).",
+    ),
     confirm: bool = typer.Option(False, "--confirm", "-y", help="Skip confirmation"),
     fallback_to_text: bool = typer.Option(
         False,
@@ -367,17 +372,23 @@ def replace_source_file_cmd(
     intact — closes the session-330/393 data-loss window). Pass ``--no-atomic``
     for the legacy delete-first behavior (not recommended).
 
+    ``source_id`` is optional — omit it to auto-match the source by the file's
+    basename against the notebook (recommended; no UUID handling). Pass
+    ``--source-id`` only to override or when auto-match reports ambiguity.
+
     Example:
-        nlm source replace-file <notebook-id> <source-id> ./new.md --confirm
-        nlm source replace-file <notebook-id> <source-id> ./settings.json --confirm --fallback-to-text
-        nlm source replace-file <notebook-id> <source-id> ./CLAUDE.md --confirm --no-atomic
+        nlm source replace-file <notebook-id> ./new.md --confirm
+        nlm source replace-file <notebook-id> ./new.md --source-id <source-id> --confirm
+        nlm source replace-file <notebook-id> ./settings.json --confirm --fallback-to-text
     """
     notebook_id = get_alias_manager().resolve(notebook_id)
-    source_id = get_alias_manager().resolve(source_id)
+    if source_id is not None:
+        source_id = get_alias_manager().resolve(source_id)
 
     if not confirm:
+        target = f"source {source_id}" if source_id else f"the source auto-matched to '{file_path}'"
         typer.confirm(
-            f"Replace source {source_id} with {file_path}? "
+            f"Replace {target} with {file_path}? "
             "The existing source will be deleted before the new file is uploaded.",
             abort=True,
         )
@@ -387,8 +398,8 @@ def replace_source_file_cmd(
             result = sources_service.replace_source_file(
                 client,
                 notebook_id,
-                source_id,
                 file_path,
+                source_id=source_id,
                 fallback_to_text=fallback_to_text,
                 atomic=atomic,
             )

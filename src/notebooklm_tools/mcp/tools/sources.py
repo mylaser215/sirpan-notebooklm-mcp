@@ -239,8 +239,8 @@ def source_delete(
 @logged_tool()
 def source_replace_file(
     notebook_id: str,
-    source_id: str,
     file_path: str,
+    source_id: str | None = None,
     confirm: bool = False,
     fallback_to_text: bool = False,
     atomic: bool = True,
@@ -267,10 +267,17 @@ def source_replace_file(
     legacy delete-first behavior (not recommended — an ADD failure permanently
     loses the source; see sessions 330/393).
 
+    ``source_id`` is optional: leave it empty to auto-match the source by
+    ``file_path``'s basename against the notebook (zero extra network I/O —
+    the source list is fetched anyway). This is the recommended path — it
+    removes UUID handling entirely and eliminates transcription errors. Only
+    provide ``source_id`` if the auto-match returns an ambiguity/no-match error.
+
     Args:
         notebook_id: Notebook UUID containing the source
-        source_id: Source UUID to replace
         file_path: Absolute path to the local file to upload
+        source_id: Optional. Leave empty to auto-match by file_path's basename.
+            Provide ONLY if the auto-match reports an ambiguous/no-match error.
         confirm: Must be True after user approval (replace is destructive —
             the old source is deleted before the new file is uploaded)
         fallback_to_text: Opt-in — route unsupported extensions to a text
@@ -290,8 +297,8 @@ def source_replace_file(
         result = sources_service.replace_source_file(
             client,
             notebook_id,
-            source_id,
             file_path,
+            source_id=source_id,
             fallback_to_text=fallback_to_text,
             atomic=atomic,
         )

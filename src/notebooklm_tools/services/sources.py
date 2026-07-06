@@ -815,9 +815,9 @@ def get_source_content(
 def replace_source_file(
     client: NotebookLMClient,
     notebook_id: str,
-    source_id: str,
     file_path: str,
     *,
+    source_id: str | None = None,
     fallback_to_text: bool = False,
     atomic: bool = True,
 ) -> ReplaceSourceFileResult:
@@ -848,11 +848,23 @@ def replace_source_file(
     synchronous serial). Pass ``atomic=False`` for the legacy delete-first
     behavior (not recommended — an ADD failure permanently loses the source).
 
+    ``source_id`` is optional (keyword-only). When omitted, it is auto-resolved
+    from ``Path(file_path).name`` against the notebook's source list — which the
+    function already fetches for title preservation, so auto-match adds zero
+    network I/O. This removes the AI-facing UUID entirely from the common path,
+    eliminating the transcription-error class (sessions 317/400/412/418). The
+    match is deterministic 3-tier (exact title → prefix title → Fail-close on
+    0/2+ candidates); see ``_match_source_by_basename``. Pass ``source_id``
+    explicitly only to override or when auto-match reports ambiguity.
+
     Args:
         client: Authenticated NotebookLM client
         notebook_id: Notebook UUID containing the source
-        source_id: Source UUID to replace
         file_path: Path to the local file to upload as the replacement
+        source_id: Source UUID to replace (keyword-only). Leave ``None`` to
+            auto-match by basename (recommended — no UUID handling). Raises
+            ValidationError on ambiguous/no match; raises ServiceError if the
+            source list cannot be fetched for auto-match.
         fallback_to_text: Opt-in — route unsupported extensions to a text
             upload (UTF-8 only). Default ``False``.
         atomic: Opt-in — perform ADD before DELETE so an ADD failure preserves
@@ -914,17 +926,36 @@ def replace_source_file(
             ) from e
         use_text_fallback = True
 
-    # 2. Title preservation (best-effort, non-fatal)
+    # 2. Resolve source_id + preserve title (single source-list fetch).
+    #    - source_id is None → auto-match by basename; the fetch is MANDATORY.
+    #      A silent pass here would hide a match failure and let the destructive
+    #      path proceed with an unresolved source (session 418 함정1).
+    #    - source_id given   → best-effort title preservation (fetch failure
+    #      is non-fatal; the replacement still works without a preserved title).
     preserved_title: str | None = None
-    try:
-        for src in client.get_notebook_sources_with_types(notebook_id):
-            if src.get("id") == source_id:
-                title_val = src.get("title")
-                if isinstance(title_val, str) and title_val.strip():
-                    preserved_title = title_val
-                break
-    except Exception:
-        pass  # title preservation is optional; proceed without it
+    if source_id is None:
+        try:
+            sources = client.get_notebook_sources_with_types(notebook_id)
+        except Exception as e:
+            raise ServiceError(
+                f"Cannot fetch sources for source_id auto-match: {e}",
+                user_message=(
+                    "source_id 미지정 자동매칭 실패 — NLM 소스 목록을 "
+                    "조회할 수 없습니다."
+                ),
+                hint="source_id를 명시하거나 네트워크·인증을 확인하세요.",
+            ) from e
+        source_id, preserved_title = _match_source_by_basename(sources, p.name)
+    else:
+        try:
+            for src in client.get_notebook_sources_with_types(notebook_id):
+                if src.get("id") == source_id:
+                    title_val = src.get("title")
+                    if isinstance(title_val, str) and title_val.strip():
+                        preserved_title = title_val
+                    break
+        except Exception:
+            pass  # title preservation is optional; proceed without it
 
     # 3 + 4. Apply add+delete in the order dictated by the ``atomic`` flag.
     if atomic:
@@ -1004,6 +1035,55 @@ def replace_source_file(
         ),
         "mode": mode,
     }
+
+
+def _match_source_by_basename(
+    sources: list[dict[str, Any]],
+    basename: str,
+) -> tuple[str, str | None]:
+    """Resolve a unique source_id from a file basename against the source list.
+
+    Deterministic 3-tier match (NLM ●●● conv 803fdca1, session 418):
+      1. Exact  — source title == ``basename``.
+      2. Prefix — source title startswith ``f"{basename} ("`` — defends the
+         auto-folder-tag titles NLM mints for duplicate filenames, e.g.
+         ``SKILL.md (two_step_solver)`` / ``nlm_seed.md (cross_3step_solver)``.
+      3. Fail-close — 0 or 2+ candidates raise ``ValidationError`` carrying the
+         candidate list, so the caller supplies an explicit ``source_id``.
+
+    Exact takes precedence: a non-empty exact set is used even if prefix
+    matches also exist. Returns ``(source_id, title)`` on a unique match.
+    Raised BEFORE any destructive delete (pre-check safety, same contract as
+    the file pre-checks in ``replace_source_file``).
+    """
+    exact = [s for s in sources if (s.get("title") or "").strip() == basename]
+    prefix = [
+        s for s in sources
+        if (s.get("title") or "").strip().startswith(f"{basename} (")
+    ]
+    candidates = exact or prefix
+    if len(candidates) == 1:
+        c = candidates[0]
+        sid = c.get("id") or ""
+        title_val = c.get("title")
+        title = title_val if isinstance(title_val, str) and title_val.strip() else None
+        return sid, title
+
+    cand_repr = (
+        ", ".join(
+            f"{{id: {s.get('id')}, title: {s.get('title')!r}}}" for s in candidates
+        )
+        or "(none)"
+    )
+    raise ValidationError(
+        f"Cannot auto-match source_id for basename {basename!r}: "
+        f"{len(candidates)} candidate(s).",
+        user_message=(
+            f"파일명 '{basename}'으로 source_id 자동매칭 실패 "
+            f"({len(candidates)}개 후보). source_id를 명시하세요."
+        ),
+        hint=f"후보: [{cand_repr}]",
+    )
 
 
 def _do_add(
@@ -1240,8 +1320,8 @@ def sync_bundle(
                 res = replace_source_file(
                     client,
                     notebook_id,
-                    existing[part_title],
                     str(part_path),
+                    source_id=existing[part_title],
                     atomic=True,
                 )
                 sid = res["new_source_id"]
