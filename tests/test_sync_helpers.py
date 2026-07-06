@@ -14,9 +14,11 @@ from typing import Any
 
 import pytest
 
+from notebooklm_tools.services import sync_helpers
 from notebooklm_tools.services.sync_helpers import (
     _classify_bundle,
     detect_drift,
+    find_disk_path,
     format_drift_summary,
     load_bundle_registry,
 )
@@ -506,3 +508,40 @@ def test_detect_drift_processed_tail_py_md(
     assert len(report["missing"]) == 0
     assert report["matched"][0]["disk_path"].endswith("vault_cron.py")
     assert report["matched"][0]["markdown_relevant"] is False  # raw .py
+
+
+# ---------------------------------------------------------------------------
+# 볼트밖 EXTERNAL_FILE_MAP + 가공 꼬리 정합 (070b566f Split-Brain 오탐 박제)
+#
+# NLM title 에 가공 꼬리(.md)가 붙은 볼트밖 소스(예: sirpan-sidebar_main.ts.md)가
+# find_disk_path 진입부 EXTERNAL_FILE_MAP 조회(원형 키)를 놓치고 _glob_vault(볼트
+# 한정)로도 도달 불가하여 상시 missing 오탐 → source_delete 데이터 유실 위험.
+# 폴백에서 가공 꼬리를 뗀 raw 키로 EXTERNAL_FILE_MAP 재조회하는 픽스의 회귀 가드.
+# ---------------------------------------------------------------------------
+
+
+def test_find_disk_path_external_with_processed_tail(monkeypatch, tmp_path: Path) -> None:
+    """볼트밖 EXTERNAL_FILE_MAP 항목 + 가공 꼬리(.md) title → 외부 경로 1개 matched."""
+    ext_file = tmp_path / "external_repo" / "src" / "widget_main.ts"
+    ext_file.parent.mkdir(parents=True)
+    ext_file.write_text("// stub", encoding="utf-8")
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    monkeypatch.setitem(sync_helpers.EXTERNAL_FILE_MAP, "widget_main.ts", ext_file)
+
+    # NLM title 은 가공 꼬리 .md 가 붙어 진입부 원형 조회를 놓침 → 폴백 재조회로 흡수
+    result = find_disk_path("widget_main.ts.md", vault_root=vault)
+    assert result == [ext_file]
+
+
+def test_find_disk_path_external_processed_tail_missing_returns_empty(
+    monkeypatch, tmp_path: Path
+) -> None:
+    """볼트밖 매핑은 있으나 디스크 파일 부재 → [] (Fail-safe, blind 삭제 방지 아님 = 진짜 잔재)."""
+    vault = tmp_path / "vault"
+    vault.mkdir()
+    ghost = tmp_path / "external_repo" / "src" / "gone.ts"  # 미생성 (부재)
+    monkeypatch.setitem(sync_helpers.EXTERNAL_FILE_MAP, "gone.ts", ghost)
+
+    result = find_disk_path("gone.ts.md", vault_root=vault)
+    assert result == []

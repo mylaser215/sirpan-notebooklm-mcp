@@ -230,6 +230,12 @@ def find_disk_path(title: str, *, vault_root: Path | None = None) -> list[Path]:
             raw = _PROCESSED_TAIL_RE.sub(
                 lambda m: f".{m.group(1)}", fname
             )
+            # 볼트밖 외부 매핑 재조회 — 진입부(위 EXTERNAL_FILE_MAP 조회)는 원형
+            # fname(가공 꼬리 .md 포함)으로만 조회하므로 raw 키를 놓친다. 가공 꼬리를
+            # 뗀 raw 로 재조회해 볼트밖 매핑(예: sirpan-sidebar_main.ts) missing 오탐 방지.
+            if raw in EXTERNAL_FILE_MAP:
+                ext_path = EXTERNAL_FILE_MAP[raw]
+                return [ext_path] if ext_path.exists() else []
             matches = _glob_vault(raw, root)
             if matches:
                 return _narrow_by_priority(matches, root)
