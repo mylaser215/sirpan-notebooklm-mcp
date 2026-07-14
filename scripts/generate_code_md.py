@@ -1,4 +1,4 @@
-"""Generate NLM RAG-friendly `<basename>.{py,ts,tsx,json}.md` wrappers from source files.
+"""Generate NLM RAG-friendly `<basename>.{py,ts,tsx,kt,json}.md` wrappers from source files.
 
 Unified successor to `generate_py_md.py` (세션35) + `generate_ts_md.py` (세션39).
 Dispatch is driven by file extension via the `PARSERS` registry at the bottom
@@ -258,12 +258,18 @@ def _ts_signature_line(source: str, offset: int) -> str:
     return source[start:end].rstrip()
 
 
-def _parse_ts(path: Path) -> dict:
-    """Extract top-level TypeScript symbols via regex."""
+def _parse_flat(path: Path, patterns: list[tuple[str, re.Pattern[str]]]) -> dict:
+    """Extract top-level symbols via a regex pattern registry (TS/Kotlin share this).
+
+    Each pattern captures the symbol name in group 1 at column 0. Results are
+    deduped by (name, line) — patterns earlier in the list win a collision, so
+    order the more-specific pattern (e.g. `enum class`) before the general one
+    (`class`) to keep its kind label.
+    """
     source = path.read_text(encoding="utf-8")
     items: list[dict] = []
     seen: set[tuple[str, int]] = set()
-    for kind, pattern in TS_SYMBOL_PATTERNS:
+    for kind, pattern in patterns:
         for m in pattern.finditer(source):
             name = m.group(1)
             line = _ts_line_of(source, m.start())
@@ -283,8 +289,11 @@ def _parse_ts(path: Path) -> dict:
     return {"items": items, "source": source}
 
 
-def _render_ts(parsed: dict) -> list[str]:
-    """Render the language-specific middle section + source fence for TypeScript."""
+def _render_flat(parsed: dict, fence: str) -> list[str]:
+    """Render the `## 코드 구조` flat-symbol section + source fence (TS/Kotlin share).
+
+    `fence` is the code-fence language tag (e.g. "typescript", "kotlin").
+    """
     lines: list[str] = []
     lines.append("## 코드 구조")
     lines.append("")
@@ -297,17 +306,65 @@ def _render_ts(parsed: dict) -> list[str]:
             sig = item["signature"]
             lines.append(f"### `{item['name']}` (line {item['lineno']}, *{item['kind']}*)")
             lines.append("")
-            lines.append(f"```typescript\n{sig}\n```")
+            lines.append(f"```{fence}\n{sig}\n```")
             lines.append("")
 
     # 원본 코드
     lines.append("## 원본 코드")
     lines.append("")
-    lines.append("```typescript")
+    lines.append(f"```{fence}")
     lines.append(parsed["source"].rstrip("\n"))
     lines.append("```")
     lines.append("")
     return lines
+
+
+def _parse_ts(path: Path) -> dict:
+    """Extract top-level TypeScript symbols via regex."""
+    return _parse_flat(path, TS_SYMBOL_PATTERNS)
+
+
+def _render_ts(parsed: dict) -> list[str]:
+    """Render the language-specific middle section + source fence for TypeScript."""
+    return _render_flat(parsed, "typescript")
+
+
+# ---------------------------------------------------------------------------
+# Kotlin: regex 기반 추출 (TS와 _parse_flat/_render_flat 공유) + flat 심볼 렌더링
+# ---------------------------------------------------------------------------
+
+# Shared modifier/annotation prefix that may precede a top-level declaration.
+# Matches at column 0; annotations (`@Foo`, `@Foo(...)`) and soft keywords are
+# all optional so the following declaration keyword is what actually anchors.
+_KT_MODS = (
+    r"(?:@[\w.]+(?:\([^)]*\))?\s+)*"  # annotations
+    r"(?:(?:public|private|internal|protected|open|final|abstract|sealed|data|"
+    r"inner|inline|value|external|expect|actual|const|lateinit|override|"
+    r"operator|infix|suspend|tailrec|annotation|companion|vararg)\s+)*"
+)
+
+# Top-level Kotlin symbol extractors. `enum` precedes `class` so `enum class Foo`
+# keeps its enum kind under (name, line) dedup in _parse_flat.
+KT_SYMBOL_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("enum", re.compile(r"^" + _KT_MODS + r"enum\s+class\s+(\w+)", re.MULTILINE)),
+    ("class", re.compile(r"^" + _KT_MODS + r"class\s+(\w+)", re.MULTILINE)),
+    ("object", re.compile(r"^" + _KT_MODS + r"object\s+(\w+)", re.MULTILINE)),
+    ("interface", re.compile(r"^" + _KT_MODS + r"(?:fun\s+)?interface\s+(\w+)", re.MULTILINE)),
+    # fun: optional generics + optional receiver (`String.` in extension funcs).
+    ("fun", re.compile(r"^" + _KT_MODS + r"fun\s+(?:<[^>]*>\s*)?(?:\w+(?:<[^>]*>)?\.)?(\w+)\s*[(<]", re.MULTILINE)),
+    ("property", re.compile(r"^" + _KT_MODS + r"(?:val|var)\s+(?:<[^>]*>\s*)?(?:\w+(?:<[^>]*>)?\.)?(\w+)\b", re.MULTILINE)),
+    ("typealias", re.compile(r"^" + _KT_MODS + r"typealias\s+(\w+)", re.MULTILINE)),
+]
+
+
+def _parse_kt(path: Path) -> dict:
+    """Extract top-level Kotlin symbols via regex."""
+    return _parse_flat(path, KT_SYMBOL_PATTERNS)
+
+
+def _render_kt(parsed: dict) -> list[str]:
+    """Render the language-specific middle section + source fence for Kotlin."""
+    return _render_flat(parsed, "kotlin")
 
 
 # ---------------------------------------------------------------------------
@@ -442,6 +499,7 @@ PARSERS: dict[str, tuple[Parser, Renderer]] = {
     ".py": (_parse_py, _render_py),
     ".ts": (_parse_ts, _render_ts),
     ".tsx": (_parse_ts, _render_ts),
+    ".kt": (_parse_kt, _render_kt),
     ".json": (_parse_json, _render_json),
 }
 
@@ -486,7 +544,7 @@ def render_md(
 def main() -> int:
     parser = argparse.ArgumentParser(
         description=(
-            "Generate NLM RAG-friendly <basename>.{py,ts,tsx,json}.md wrapper for a "
+            "Generate NLM RAG-friendly <basename>.{py,ts,tsx,kt,json}.md wrapper for a "
             "source file. Dispatch is automatic by file extension."
         ),
     )

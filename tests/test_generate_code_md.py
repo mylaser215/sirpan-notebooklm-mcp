@@ -228,3 +228,82 @@ def test_json_is_supported_extension(tmp_path: Path) -> None:
     assert result.returncode == 2
     assert "missing" in result.stdout
     assert "unsupported" not in result.stderr
+
+
+# ---------------------------------------------------------------------------
+# Kotlin 구조추출 (.kt 지원 — PARSERS OCP 확장)
+# ---------------------------------------------------------------------------
+
+_KT_SAMPLE = """\
+package com.example
+
+const val VERSION = 3
+var counter = 0
+
+data class User(val id: Int, val name: String)
+
+sealed class Result
+
+enum class Color { RED, GREEN, BLUE }
+
+interface Repository {
+    fun findAll(): List<User>
+}
+
+object Registry {
+    val items = mutableListOf<String>()
+}
+
+fun greet(name: String): String = "hi $name"
+
+typealias Handler = (Int) -> Unit
+"""
+
+
+def test_kotlin_symbol_extraction(tmp_path: Path) -> None:
+    """top-level Kotlin 심볼(class/data class/sealed/enum/interface/object/fun/property/typealias)이
+    각자 kind와 함께 추출되고, 원본은 kotlin fence로 보존된다."""
+    src = tmp_path / "sample.kt"
+    src.write_text(_KT_SAMPLE, encoding="utf-8")
+    out = tmp_path / "sample.kt.md"
+    result = _run(str(src), "--out", str(out), "--force")
+    assert result.returncode == 0, result.stderr
+    text = out.read_text(encoding="utf-8")
+
+    assert "## 코드 구조" in text
+    # 심볼 이름
+    for name in ("User", "Result", "Color", "Repository", "Registry", "greet", "Handler", "VERSION", "counter"):
+        assert f"`{name}`" in text, name
+    # kind 라벨 — enum class는 class가 아닌 enum으로 잡혀야 한다 (dedup 우선순위)
+    assert "*enum*" in text
+    assert "*interface*" in text
+    assert "*object*" in text
+    assert "*fun*" in text
+    assert "*property*" in text
+    assert "*typealias*" in text
+    # data class / sealed class는 class kind
+    assert "*class*" in text
+    # fence는 kotlin
+    assert "```kotlin" in text
+
+
+def test_kotlin_extension_function(tmp_path: Path) -> None:
+    """확장 함수 `fun String.shout()`는 receiver를 벗기고 심볼명만 추출한다."""
+    src = tmp_path / "ext.kt"
+    src.write_text("fun String.shout(): String = this.uppercase()\n", encoding="utf-8")
+    out = tmp_path / "ext.kt.md"
+    result = _run(str(src), "--out", str(out), "--force")
+    assert result.returncode == 0, result.stderr
+    text = out.read_text(encoding="utf-8")
+    assert "`shout`" in text
+    assert "*fun*" in text
+
+
+def test_kotlin_is_supported_extension(tmp_path: Path) -> None:
+    """.kt는 지원 확장자 — unsupported가 아니라 정상 dispatch(여기선 missing)."""
+    src = tmp_path / "x.kt"
+    src.write_text("fun main() {}\n", encoding="utf-8")
+    result = _run(str(src), "--check")  # 기본 out(x.kt.md) 부재 → missing(2)
+    assert result.returncode == 2
+    assert "missing" in result.stdout
+    assert "unsupported" not in result.stderr
