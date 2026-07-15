@@ -86,13 +86,15 @@ def test_save_tokens_no_fd_leak_on_fdopen_failure(tmp_cache_path):
 
 
 @_SKIP_ON_WINDOWS
-def test_save_profile_cookies_and_metadata_0o600(tmp_path):
+def test_save_profile_cookies_and_metadata_0o600(tmp_path, monkeypatch):
     """AuthManager.save_profile — cookies.json + metadata.json 둘 다 0o600."""
+    # profile_dir/cookies_file/metadata_file은 setter 없는 @property → 원천 모듈
+    # get_profile_dir을 패치해 tmp_path로 격리 (property가 매 호출 fresh import).
+    monkeypatch.setattr(
+        "notebooklm_tools.utils.config.get_profile_dir",
+        lambda name: tmp_path / "profile",
+    )
     mgr = AuthManager("test_profile")
-    # profile_dir을 tmp_path로 격리
-    mgr.profile_dir = tmp_path / "profile"
-    mgr.cookies_file = mgr.profile_dir / "cookies.json"
-    mgr.metadata_file = mgr.profile_dir / "metadata.json"
 
     mgr.save_profile(
         cookies={"SID": "x"},

@@ -166,6 +166,9 @@ def _save_port_map(data: dict[str, dict]) -> None:
     try:
         fd = os.open(str(map_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
+            # SIR-PAN FIX(batch2 실측): 기존 느슨한 파일 덮어쓰기 시 0o600 복원 (fchmod).
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
             f = os.fdopen(fd, "w", encoding="utf-8")
         except BaseException:
             os.close(fd)

@@ -143,6 +143,10 @@ def save_tokens_to_cache(tokens: AuthTokens, silent: bool = False) -> None:
     # 생성 시점에 적용.
     fd = os.open(str(cache_path), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
     try:
+        # SIR-PAN FIX(batch2 실측): os.open mode는 신규 생성 시에만 적용 → 기존 느슨한
+        # 파일 덮어쓰기 시 0o600 미복원(upstream f2fb921 회귀). fd 대상이라 새 TOCTOU 없음.
+        if hasattr(os, "fchmod"):
+            os.fchmod(fd, 0o600)
         f = os.fdopen(fd, "w", encoding="utf-8")
     except BaseException:
         os.close(fd)
@@ -424,6 +428,9 @@ class AuthManager:
         # Save cookies — 배치2 ATOM-1 (upstream f2fb921): TOCTOU 차단
         fd = os.open(str(self.cookies_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
+            # SIR-PAN FIX(batch2 실측): 기존 느슨한 파일 덮어쓰기 시 0o600 복원 (fchmod).
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
             f = os.fdopen(fd, "w", encoding="utf-8")
         except BaseException:
             os.close(fd)
@@ -441,6 +448,9 @@ class AuthManager:
         }
         fd = os.open(str(self.metadata_file), os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
         try:
+            # SIR-PAN FIX(batch2 실측): 기존 느슨한 파일 덮어쓰기 시 0o600 복원 (fchmod).
+            if hasattr(os, "fchmod"):
+                os.fchmod(fd, 0o600)
             f = os.fdopen(fd, "w", encoding="utf-8")
         except BaseException:
             os.close(fd)
