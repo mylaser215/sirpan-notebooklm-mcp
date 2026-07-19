@@ -455,9 +455,88 @@ from notebooklm_tools.utils.config import get_chrome_profile_dir  # noqa: E402
 
 
 def is_profile_locked(profile_name: str = "default") -> bool:
-    """Check if the Chrome profile is locked (Chrome is using it)."""
+    """Check if the Chrome profile is locked (Chrome is using it).
+
+    NOTE: `SingletonLock` is a POSIX-only artifact (Linux/macOS). On Windows,
+    Chromium guards the profile with a kernel Named Mutex and never writes this
+    file, so this returns False on Windows regardless of lock state. Real
+    cross-platform cleanup is handled by ``_cleanup_zombie_chrome`` — do not gate
+    launch decisions on this function alone.
+    """
     lock_file = get_chrome_profile_dir(profile_name) / "SingletonLock"
     return lock_file.exists()
+
+
+def _cleanup_zombie_chrome(profile_dir: Path) -> int:
+    """Kill stale Chrome processes holding ``profile_dir``, then clear POSIX lock.
+
+    A prior headless-auth Chrome can survive (e.g. the MCP server restarted
+    before ``run_headless_auth``'s ``finally`` terminate ran). On Windows the
+    profile is guarded by a kernel Named Mutex, so relaunching with the same
+    ``--user-data-dir`` just forwards to the zombie and exits immediately — the
+    debugging port never opens and auth recovery loops forever. That is the
+    failure that forces ``nlm login --clear`` (a destructive profile wipe that
+    also nukes the 400-day core session cookies). ``SingletonLock`` is
+    POSIX-only, so Windows needs a process-level cleanup instead.
+
+    Targets are matched by exact ``--user-data-dir`` in the process cmdline. The
+    MCP Chrome profile is a dedicated sandbox
+    (``~/.notebooklm-mcp-cli/chrome-profiles/<name>``), so the user's everyday
+    Chrome — a different profile path — is never a match. cmdline matching is
+    used over PID files because PID/BFS chains break when an intermediate
+    wrapper process dies (NLM_MCP_Archive precedent).
+
+    Fail-open: any error is swallowed so cleanup never breaks the auth flow.
+
+    Returns the number of processes killed.
+    """
+    profile_dir = Path(profile_dir)
+    try:
+        import psutil
+    except ImportError:  # pragma: no cover - psutil is a declared dependency
+        _logger.debug("psutil unavailable; skipping zombie Chrome cleanup")
+        return 0
+
+    def _norm(p: str) -> str:
+        return os.path.normcase(os.path.normpath(p))
+
+    target = _norm(str(profile_dir))
+
+    def _holds_profile(cmdline: list[str]) -> bool:
+        for i, arg in enumerate(cmdline):
+            if arg.startswith("--user-data-dir="):
+                if _norm(arg.split("=", 1)[1]) == target:
+                    return True
+            elif arg == "--user-data-dir" and i + 1 < len(cmdline):
+                if _norm(cmdline[i + 1]) == target:
+                    return True
+        return False
+
+    killed = 0
+    try:
+        for proc in psutil.process_iter(["name", "cmdline"]):
+            try:
+                name = (proc.info.get("name") or "").lower()
+                if "chrome" not in name and "chromium" not in name:
+                    continue
+                if not _holds_profile(proc.info.get("cmdline") or []):
+                    continue
+                proc.kill()
+                killed += 1
+                _logger.info("Cleaned up zombie Chrome pid=%s holding profile %s", proc.pid, target)
+            except (psutil.NoSuchProcess, psutil.AccessDenied, psutil.ZombieProcess):
+                continue
+            except Exception as e:  # pragma: no cover - defensive
+                _logger.debug("zombie cleanup skip pid: %s: %s", type(e).__name__, e)
+                continue
+    except Exception as e:  # pragma: no cover - defensive
+        _logger.warning("zombie Chrome cleanup failed: %s: %s", type(e).__name__, e)
+
+    # Clear stale POSIX SingletonLock (no-op on Windows, where the file is absent).
+    with contextlib.suppress(Exception):
+        (profile_dir / "SingletonLock").unlink(missing_ok=True)
+
+    return killed
 
 
 def find_existing_nlm_chrome(
@@ -526,6 +605,11 @@ def launch_chrome_process(
 
     profile_dir = get_chrome_profile_dir(profile_name)
     profile_dir.mkdir(parents=True, exist_ok=True)
+
+    # Kill any stale Chrome zombie still holding this profile (Named Mutex on
+    # Windows / SingletonLock on POSIX). Without this, a forwarded launch exits
+    # without opening the debugging port and auth recovery loops forever.
+    _cleanup_zombie_chrome(profile_dir)
 
     args = [
         chrome_path,
@@ -908,13 +992,10 @@ def extract_cookies_via_cdp(
         reused_existing = True
 
     if not debugger_url and auto_launch:
-        if is_profile_locked(profile_name):
-            # Profile locked but no browser found on known ports - stale lock?
-            raise AuthenticationError(
-                message="The NLM auth profile is locked but no browser instance was found",
-                hint=f"Close any stuck browser processes or delete the SingletonLock file in the {profile_name} browser profile.",
-            )
-
+        # No abort on is_profile_locked here: launch_chrome_process below runs
+        # _cleanup_zombie_chrome to clear any stale zombie/lock and relaunch,
+        # instead of dead-ending the caller (the old behavior that forced
+        # `nlm login --clear`).
         if not get_chrome_path():
             browser_names = get_supported_browsers()
             if len(browser_names) > 1:
@@ -1162,13 +1243,10 @@ def run_headless_auth(
             # Chrome already running - use existing instance
             chrome_was_running = True
         else:
-            # No Chrome running - launch in headless mode
-            if is_profile_locked(profile_name):
-                _logger.info(
-                    "run_headless_auth: profile %r locked by another Chrome instance; aborting headless launch",
-                    profile_name,
-                )
-                return None
+            # No Chrome running - launch in headless mode.
+            # (Stale-lock/zombie handling is done inside launch_chrome_process
+            # via _cleanup_zombie_chrome — do NOT abort on is_profile_locked here,
+            # which is a POSIX-only no-op on Windows and blocks recovery.)
             chrome_process = launch_chrome_process(port, headless=True, profile_name=profile_name)
             if not chrome_process:
                 return None
