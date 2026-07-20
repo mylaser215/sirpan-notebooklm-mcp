@@ -375,6 +375,8 @@ class BaseClient:
         self._headless_auth_lock = threading.Lock()
         # 세션56 Q4 ●●● — 데드락 방지 타임스탬프 (좀비 future 강제 리셋용)
         self._headless_auth_started_at: float | None = None
+        # 세션72 — Proactive RTS 선제갱신 쓰로틀 타임스탬프 (핫패스 I/O 방어)
+        self._last_rts_precheck_at: float = 0.0
 
         # Only refresh CSRF token if not provided - tokens actually last hours/days, not minutes
         # The retry logic in _call_rpc() handles expired tokens gracefully
@@ -712,6 +714,9 @@ class BaseClient:
             parsed = self._parse_response(response.text)
             result = self._extract_rpc_result(parsed, rpc_id)
 
+            # 세션72 — RPC 성공 핫패스에서 RTS 임박 만료를 선제 갱신 (background).
+            self._maybe_proactive_rts_refresh()
+
             # Enhanced debug logging for extracted result
             if logger.isEnabledFor(logging.DEBUG):
                 logger.debug("-" * 70)
@@ -902,6 +907,56 @@ class BaseClient:
         except Exception as e:
             # Non-critical: caching is an optimization, but log at debug level
             logger.debug(f"Failed to update auth token cache: {e}")
+
+    def _maybe_proactive_rts_refresh(self) -> None:
+        """세션72 — RPC 성공 직후 RTS 임박 만료 시 백그라운드 선제 갱신.
+
+        Google RTS(``__Secure-1/3PSIDRTS``)는 10분마다 회전 만료된다. 만료 후
+        도구 호출이 실패하면 Layer 3가 headless Chrome(8-15s)으로 reactive 복구
+        하는데, 활발한 대화 중 순단을 유발한다. 본 메서드는 만료 *전* 백그라운드로
+        디스크 ``cookies.json``을 선제 신선화 → 이후 만료 시 Layer 2가 headless
+        대신 디스크 reload(~0.x초)로 복구하게 만든다.
+
+        설계 (NLM ●●● conv ``803fdca1``):
+        - **60초 쓰로틀**: ``_call_rpc`` 성공은 초고빈도 핫패스이므로 매번
+          ``_is_rts_expiring``(cookies.json 파싱)를 부르지 않도록 방어.
+        - **Double-checked locking**: 락 없이 사전 검사 후 조건 충족 시에만
+          ``_headless_auth_lock`` 획득 → 핫패스 병목 회피.
+        - **레이스 원천 차단**: Layer 3와 동일한 ``_headless_auth_future``/lock을
+          재사용 → 두 번째 headless Chrome이 안 생겨 세션71 좀비청소가 서로를
+          kill하는 파국을 방지. Fail-and-forget (fire-and-forget executor).
+        """
+        # BaseClient.__init__을 경유하지 않은 인스턴스(일부 mixin 단위 테스트) fail-safe
+        if getattr(self, "_headless_auth_lock", None) is None:
+            return
+        now = time.time()
+        # 60초 쓰로틀 (핫패스 I/O 방어) + 1차 lock-free 검사
+        if getattr(self, "_last_rts_precheck_at", 0.0) >= now - 60:
+            return
+        self._last_rts_precheck_at = now
+        if self._headless_auth_future is not None and not self._headless_auth_future.done():
+            return  # 이미 갱신(선제/reactive) 진행 중 → 중복 방지
+
+        from .auth import _is_rts_expiring
+
+        if not _is_rts_expiring(margin_sec=120):  # 120초 임박 시만
+            return
+
+        with self._headless_auth_lock:
+            # 2차 락 내부 재검증 (double-checked)
+            if self._headless_auth_future is not None and not self._headless_auth_future.done():
+                return
+            from notebooklm_tools.utils.cdp import has_chrome_profile, run_headless_auth
+
+            if not has_chrome_profile("default"):
+                return
+            logger.info("RTS expiring soon (<120s). Proactive background auth triggered.")
+            executor = concurrent.futures.ThreadPoolExecutor(
+                max_workers=1, thread_name_prefix="nlm-proactive-auth",
+            )
+            self._headless_auth_future = executor.submit(run_headless_auth)
+            self._headless_auth_started_at = time.time()
+            executor.shutdown(wait=False)  # fire-and-forget
 
     def _try_reload_or_headless_auth(self) -> bool:
         """Try to recover authentication by reloading from disk or running headless auth.
