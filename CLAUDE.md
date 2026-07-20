@@ -14,8 +14,8 @@ NotebookLM 프로그래밍 접근을 위한 MCP 서버 + CLI.
 
 ## 빌드 & 실행
 ```bash
-uv tool install .                          # 설치
-uv cache clean && uv tool install --force . # 코드 변경 후 재설치
+uv tool install -e .                       # 설치 (editable — 세션72 전환, 소스 수정 시 재설치 불필요)
+# 코드 변경 반영 = mcp_launcher stop/start notebooklm + Claude Code /exit 재접속 (스키마 캐시)
 notebooklm-mcp                             # MCP 서버 (stdio)
 notebooklm-mcp --transport http --port 9472 # HTTP 모드
 uv run pytest                               # 테스트
