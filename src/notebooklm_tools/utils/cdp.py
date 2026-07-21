@@ -72,6 +72,12 @@ CDP_PORT_RANGE = range(9222, 9232)  # Ports to scan for existing/available
 # 포그라운드 extract_cookies_via_cdp(tries=30, line 923)와 통일.
 # 비대칭(5 vs 30)이 background race silent fail 결정 원인 (260514 NLM 자문 ●●●).
 CDP_HEADLESS_TRIES = 30
+# 갓 띄운 headless Chrome은 페이지 생성 직후 ~1-3s 동안 about:blank를 보고한다.
+# is_logged_in을 즉시 검사하면 항상 False → run_headless_auth가 None을 반환해
+# 자동 재인증이 결정론적으로 실패(수동 nlm login 강제)한다. 인터랙티브 경로의
+# wait_for_login 폴링을 headless에도 이식하되, base.py의
+# HEADLESS_AUTH_DEADLOCK_TIMEOUT_SEC(60s) 우산 아래로 짧게 끊는다 (세션73 NLM ●●●).
+HEADLESS_NAV_SETTLE_TIMEOUT = 15
 NOTEBOOKLM_URL = f"{get_base_url()}/"
 
 import logging as _logging  # noqa: E402
@@ -1266,10 +1272,28 @@ def run_headless_auth(
         if not ws_url:
             return None
 
-        # Check if logged in by URL
-        current_url = get_current_url(ws_url)
+        # Wait for the freshly-launched headless page to finish navigating before
+        # judging login state. A cold headless Chrome reports about:blank for the
+        # first ~1-3s; checking is_logged_in immediately always returns False and
+        # aborts recovery — the deterministic root cause of repeated headless-auth
+        # failures that force a manual `nlm login` (세션73 라이브 실측 2/2 재현).
+        # Mirror the interactive path's wait_for_login poll, but with a short
+        # headless-only deadline that stays under base.py's 60s deadlock guard.
+        # Early-exit on accounts.google.com — a genuine logout headless cannot fix.
+        nav_deadline = time.time() + HEADLESS_NAV_SETTLE_TIMEOUT
+        current_url = ""
+        while time.time() < nav_deadline:
+            try:
+                current_url = get_current_url(ws_url)
+            except Exception:
+                current_url = ""  # fail-open: transient CDP hiccup during navigation
+            if is_logged_in(current_url):
+                break
+            if "accounts.google.com" in current_url:
+                break  # session dead — headless can't re-auth without a UI
+            time.sleep(0.5)
         if not is_logged_in(current_url):
-            # Not logged in - headless can't help
+            # Not logged in (session dead) or page never settled - headless can't help
             return None
 
         # Extract cookies
@@ -1292,6 +1316,26 @@ def run_headless_auth(
             extracted_at=time.time(),
         )
         save_tokens_to_cache(tokens)
+
+        # Persist the FULL cookie list (with expires metadata) to the profile that
+        # readers prioritize. save_tokens_to_cache only writes the flat-dict auth.json,
+        # but _is_rts_expiring / load_cached_tokens read profiles/<name>/cookies.json
+        # first — so a headless-refreshed RTS was silently shadowed and lost on
+        # refresh_auth's disk-reload path (세션73 split-brain 결함). auth.json is kept
+        # for backward compatibility (NLM ●●● conv 803fdca1).
+        try:
+            from notebooklm_tools.core.auth import get_auth_manager
+
+            get_auth_manager(profile_name).save_profile(
+                cookies_list,
+                csrf_token=csrf_token or "",
+                session_id=session_id or "",
+                email=extract_email(html) or None,
+                force=True,
+                build_label=extract_build_label(html) or "",
+            )
+        except Exception as e:
+            _logger.warning("headless profile persist failed (non-fatal): %s: %s", type(e).__name__, e)
 
         # Clean up cache to minimize profile size
         cleanup_chrome_profile_cache(profile_name)
