@@ -963,6 +963,10 @@ class BaseClient:
 
         Returns True if new valid tokens were obtained, False otherwise.
         Raises AuthRecoveryInProgress if Layer 3 was kicked off in background.
+
+        Note: cdp.run_headless_auth carries a 2nd-layer module single-flight (세션75)
+        that also serializes refresh_auth's bypassing direct calls — this instance
+        lock/future is the application-level debounce on top of it.
         """
         from .auth import _is_rts_expiring, load_cached_tokens
         from .errors import AuthRecoveryInProgress

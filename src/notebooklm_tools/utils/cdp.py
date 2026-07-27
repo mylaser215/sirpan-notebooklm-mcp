@@ -9,12 +9,14 @@ Usage:
     3. No keychain access required!
 """
 
+import concurrent.futures
 import json
 import os
 import platform
 import re
 import shutil
 import subprocess
+import threading
 import time
 from pathlib import Path
 from typing import Any
@@ -88,6 +90,23 @@ _logger = _logging.getLogger(__name__)
 _logger.propagate = True
 if not _logger.handlers:
     _logger.addHandler(_logging.NullHandler())
+
+# ── Headless-auth single-flight (모듈 레벨, port 9223 물리 싱글턴 직렬화) ──────
+# run_headless_auth는 port 9223·profile "default"를 물리적으로 점유(OS 레벨 싱글턴)
+# 한다. base.py의 _headless_auth_lock/_headless_auth_future(proactive·Layer3)는 그
+# *인스턴스*를 경유한 호출만 직렬화하고, mcp/tools/auth.py:refresh_auth의 우회 직접
+# 호출은 못 막는다 → 백그라운드 auth 진행 중 refresh_auth 호출 시 이중 headless
+# Chrome이 뜨고 _cleanup_zombie_chrome가 서로의 정상 Chrome을 kill하는 파국(세션71).
+# 자원이 사는 이 모듈에 single-flight를 두면 refresh_auth·proactive·Layer3·미래의
+# 어떤 프로세스-내 호출자도 자동 커버된다 (NLM+신드리 ●●● 합의, 세션75).
+_singleflight_lock = threading.Lock()
+_singleflight_future: "concurrent.futures.Future | None" = None
+_singleflight_started_at: float | None = None
+_singleflight_profile: str | None = None
+# base.py HEADLESS_AUTH_DEADLOCK_TIMEOUT_SEC(60s)의 모듈판 미러 + 여유 마진. leader
+# 스레드가 진짜 hang하면 future가 영원히 안 풀려 *모듈 영구 잠금*(현상보다 악화)이
+# 되므로, 이 나이를 넘긴 in-flight는 좀비로 보고 강제 클리어 후 새 leader를 승격한다.
+_SINGLEFLIGHT_ZOMBIE_SEC = 90.0
 
 
 def _cdp_http_base(port: int) -> str:
@@ -1211,12 +1230,15 @@ def cleanup_chrome_profile_cache(profile_name: str = "default") -> int:
     return bytes_freed
 
 
-def run_headless_auth(
+def _run_headless_auth_impl(
     port: int = 9223,
     timeout: int = 30,
     profile_name: str = "default",
 ) -> "Any | None":
-    """Run authentication in headless mode (no user interaction).
+    """Actual headless-auth body. NEVER call directly — always go through the
+    public ``run_headless_auth`` single-flight wrapper (below), which serializes
+    the port 9223 physical singleton. Exposing this impl as a public symbol would
+    reopen the double-Chrome race (세션75).
 
     This only works if the Chrome profile already has saved Google login.
     The Chrome process is automatically terminated after token extraction.
@@ -1356,3 +1378,114 @@ def run_headless_auth(
         # Don't terminate if we connected to existing Chrome instance
         if chrome_process and not chrome_was_running:
             terminate_chrome(chrome_process, port)
+
+
+def run_headless_auth(
+    port: int = 9223,
+    timeout: int = 30,
+    profile_name: str = "default",
+) -> "Any | None":
+    """Single-flight wrapper around ``_run_headless_auth_impl`` (세션75).
+
+    **Why here**: port 9223 / profile "default" is an OS-level physical singleton.
+    base.py's ``_headless_auth_future``/``_headless_auth_lock`` (proactive selfheal +
+    Layer 3 reactive) only serialize calls that go *through the client instance*;
+    ``mcp/tools/auth.py:refresh_auth`` calls this symbol directly and bypasses that
+    coordination. Two concurrent headless launches then fight over the port and
+    ``_cleanup_zombie_chrome`` kills each other's live Chrome (세션71 파국). Guarding
+    the resource where it lives auto-covers refresh_auth, proactive, Layer 3, and any
+    future in-process caller — a clean orthogonal 2nd layer on top of base.py's
+    application-level debounce / fast-return semantics (NLM+신드리 ●●● 합의).
+
+    Semantics = **share-in-flight, not re-run**: a concurrent caller for the same
+    profile joins the leader's Future and receives the same tokens (fresh within the
+    RTS 10-min window). Re-running would make every follower spin a full Chrome cycle
+    because the impl's ``finally`` terminates the leader's Chrome.
+
+    **Cross-process is out of scope**: the SessionStart hook's ``nlm login`` is a
+    separate OS process a module lock cannot see — that layer is owned by the
+    ``~/.claude/mcp-pids/nlm_renew.lock`` file lock, not this function.
+
+    Signature mirrors the impl so callers (and the ``run_headless_auth`` symbol
+    monkeypatch in tests) stay source-compatible.
+    """
+    global _singleflight_future, _singleflight_started_at, _singleflight_profile
+
+    my_future: "concurrent.futures.Future | None" = None
+    share_future: "concurrent.futures.Future | None" = None  # same profile → join & return
+    wait_future: "concurrent.futures.Future | None" = None  # other profile → wait, then lead
+
+    with _singleflight_lock:
+        inflight = _singleflight_future
+        if inflight is not None and not inflight.done():
+            started = _singleflight_started_at
+            age = (time.time() - started) if started is not None else None
+            if age is not None and age > _SINGLEFLIGHT_ZOMBIE_SEC:
+                # Leader hung past the zombie threshold — force-clear so we don't
+                # get a permanent module lock (worse than the original defect).
+                _logger.warning(
+                    "headless single-flight zombie (age %.0fs > %.0fs). "
+                    "Force-clearing and promoting a new leader.",
+                    age,
+                    _SINGLEFLIGHT_ZOMBIE_SEC,
+                )
+                _singleflight_future = None
+                _singleflight_started_at = None
+                _singleflight_profile = None
+            elif _singleflight_profile == profile_name:
+                # Same profile in-flight → follower: share its result.
+                share_future = inflight
+            else:
+                # Different profile in-flight → wait for it, then run our own.
+                # (All current callers use "default"; this is a contamination
+                # guard, not a hot path.)
+                wait_future = inflight
+
+        if share_future is None and wait_future is None:
+            # Become the leader now.
+            my_future = concurrent.futures.Future()
+            _singleflight_future = my_future
+            _singleflight_started_at = time.time()
+            _singleflight_profile = profile_name
+
+    # Follower (same profile): share the leader's result. Bounded wait so a wedged
+    # leader never blocks us forever.
+    if share_future is not None:
+        try:
+            return share_future.result(timeout=_SINGLEFLIGHT_ZOMBIE_SEC)
+        except Exception:
+            return None
+
+    # Different-profile serialization: wait for the other flight to finish, then
+    # register ourselves as the new leader before running.
+    if wait_future is not None:
+        try:
+            wait_future.result(timeout=_SINGLEFLIGHT_ZOMBIE_SEC)
+        except Exception:
+            pass
+        with _singleflight_lock:
+            my_future = concurrent.futures.Future()
+            _singleflight_future = my_future
+            _singleflight_started_at = time.time()
+            _singleflight_profile = profile_name
+
+    # Leader path: run the real body inline, then resolve + clear state.
+    result = None
+    try:
+        result = _run_headless_auth_impl(
+            port=port, timeout=timeout, profile_name=profile_name
+        )
+        return result
+    finally:
+        with _singleflight_lock:
+            # Identity check: only clear if we are still the registered flight
+            # (a zombie-guard promotion may have replaced us).
+            if _singleflight_future is my_future:
+                _singleflight_future = None
+                _singleflight_started_at = None
+                _singleflight_profile = None
+            # Resolve for any followers. Clearing state first ensures a caller
+            # arriving post-completion becomes a fresh leader rather than joining a
+            # finished flight.
+            if my_future is not None and not my_future.done():
+                my_future.set_result(result)

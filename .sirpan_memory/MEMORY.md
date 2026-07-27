@@ -4,12 +4,12 @@
 - 세션아카이브: `000-시스템/070-세션로그/notebooklm-mcp_세션아카이브.md`
 - 타임라인: `000-시스템/070-세션로그/notebooklm-mcp_작업타임라인.md`
 
-## 현재 상태 (260720 세션72)
+## 현재 상태 (260727 세션75)
 - **NotebookLM MCP v0.5.23** — Python/uv/FastMCP, 포트 9472, editable(-e) 설치(세션72 — 소스 수정 시 재설치 불필요)
 - GitHub: mylaser215/sirpan-notebooklm-mcp (fork from jacob-bd/notebooklm-mcp-cli)
-- 회귀 영구 가드 **1043 PASS** Green (세션70 fchmod +, 세션71 좀비청소 +8, 세션72 RTS선제갱신 +6 포함)
-- v8 허브 2종 모두 💎 done-keep 졸업 (전 항목 `[x]`, detect_drift 159소스 0잔재·0모호 클린) — 260720 재확인
-- **인증 3계층 안정화(세션70~72)**: fchmod 0o600 + 좀비Chrome청소(`_cleanup_zombie_chrome`) + RTS 선제갱신(`_maybe_proactive_rts_refresh`). 활성 트래픽 순단방지 검증완료(11:49 proactive 라이브). cold(장기idle) 복구 `nlm login` hang 1건 감시중(`260720-153726`)
+- 회귀 영구 가드 **1052 PASS** Green (세션75 single-flight +5 포함)
+- v8 허브 2종 모두 💎 done-keep 졸업 (전 항목 `[x]`, detect_drift 159소스 0잔재·0모호 클린)
+- **인증 안정화(세션70~75)**: fchmod 0o600 + 좀비Chrome청소(`_cleanup_zombie_chrome`) + RTS 선제갱신(`_maybe_proactive_rts_refresh`) + about:blank 네비 레이스 픽스(세션74) + **headless single-flight**(세션75 — `cdp.py` 모듈 락으로 refresh_auth 우회 이중 Chrome 레이스 근본차단, NLM+신드리 합의). cold(장기idle) 복구 `nlm login` hang 1건 감시중(`260720-153726`)
 - ⚠️ 상세 세션별 이력은 세션아카이브·타임라인 참조 (본 MEMORY는 포인터만)
 
 ## 허브 추적
@@ -25,8 +25,8 @@
 - `260523-015000-media-source-expansion-plan`: NLM 멀티미디어 소스 확장 (별 세션 단서 캡쳐 후 시공)
 
 ## 최근 세션
-- 세션72 (260720): RTS 선제갱신 `_maybe_proactive_rts_refresh`(활성 핫패스 RTS 선신선화) + editable(-e) 빌드 전환 — 1043 PASS. `6aed973`·`24a38f1`
+- 세션75 (260727): refresh_auth 이중 headless Chrome 레이스 근본치료 — `cdp.py` 모듈 single-flight(`run_headless_auth`→`_run_headless_auth_impl` rename + wrapper, 결과공유·좀비가드90s). NLM 원안(클래스변수승격) 신드리 실측 반박(섀도잉 no-op)으로 기각→모듈락 합의. SOURCE_LIMIT_GUARD 감시 todo 청산. 1052 PASS (작업dir 미커밋)
+- 세션74 (260721): headless 자동재인증 about:blank 네비 레이스 근본치료 — `c22776b`
+- 세션72 (260720): RTS 선제갱신 `_maybe_proactive_rts_refresh` + editable(-e) 빌드 전환 — 1043 PASS. `6aed973`·`24a38f1`
 - 세션71 (260719): Windows 좀비 Chrome 청소 `_cleanup_zombie_chrome`(`nlm login --clear` 반복 근본치료, SingletonLock은 POSIX전용) — 1037 PASS. `0ce10b2`
 - 세션70 (260715): fchmod로 자격증명 0o600 복원(upstream f2fb921 write-then-chmod 회귀) — 1029 PASS. `448700d`
-- 세션69 (260714): generate_code_md.py Kotlin(.kt) 파서 추가 — `cb85fda`
-- 세션68 (260706): detect_drift 볼트밖 소스 missing 오탐 픽스(B③ `070b566f` 해소, EXTERNAL_FILE_MAP raw 재조회) — `174b447` / (크로스 세션418) source_replace_file `source_id` optional 자동매칭(UUID 전사오류 근본방어) — `02bc2fa`
