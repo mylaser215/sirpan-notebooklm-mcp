@@ -991,6 +991,28 @@ class TestBoundedConversationCache:
         assert stats["conversations"] == 3
         assert stats["total_turns"] == 6
 
+    def test_stats_expose_cache_age(self):
+        """cache_created_at / cache_age_seconds expose the client-instance age.
+
+        세션76: the cache lives and dies with the client instance (dropped by
+        reset_client() on every auth refresh), so cache age — not process
+        uptime — is the honest signal for envvar tuning.
+        """
+        mixin = ConversationMixin(cookies={"test": "cookie"}, csrf_token="test")
+        stats = mixin.get_conversation_cache_stats()
+        assert stats["cache_created_at"] > 0
+        assert stats["cache_age_seconds"] >= 0
+        # A freshly-created instance is essentially brand new.
+        assert stats["cache_age_seconds"] < 60
+
+    def test_cache_created_at_is_instance_attribute(self):
+        """_cache_created_at must be a per-instance attr (in __dict__), never a
+        class/module var — otherwise a new client from reset_client() would not
+        get a fresh cache age. Guards against the 세션75 class-var-shadowing
+        family of mistakes (신드리 사후 감수 축4)."""
+        mixin = ConversationMixin(cookies={"test": "cookie"}, csrf_token="test")
+        assert "_cache_created_at" in mixin.__dict__
+
     def test_clear_conversation_still_works(self):
         """Clearing a conversation is independent of the new caps."""
         mixin = ConversationMixin(cookies={"test": "cookie"}, csrf_token="test")

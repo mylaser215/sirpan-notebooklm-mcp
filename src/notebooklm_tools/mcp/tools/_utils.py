@@ -134,6 +134,17 @@ def reset_client() -> None:
         _client = None
 
 
+def peek_client() -> NotebookLMClient | None:
+    """Return the current singleton client without creating one.
+
+    Unlike get_client(), this never triggers authentication or client
+    creation — it is a side-effect-free peek for introspection tools
+    (e.g. conversation_cache_stats). Returns None if no client exists yet.
+    """
+    with _client_lock:
+        return _client
+
+
 def get_mcp_instance() -> Any:
     """Get the FastMCP instance. Import here to avoid circular imports."""
     from notebooklm_tools.mcp.server import mcp

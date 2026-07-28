@@ -8,6 +8,7 @@ and conversation-related operations.
 import json
 import logging
 import os
+import time
 import urllib.parse
 from typing import Any, Protocol, cast
 
@@ -185,6 +186,12 @@ class ConversationMixin(BaseClient):
         Note: `conversations` and `total_turns` are captured under the lock;
         the cap fields are immutable post-init, so the small window between
         release and dict construction is harmless.
+
+        `cache_created_at` / `cache_age_seconds` (세션76): the cache lives and
+        dies with the client instance, which reset_client() drops only when the
+        refresh_auth tool succeeds or the profile switches (in-place Layer 2/3
+        401 recovery preserves it) — so cache age, NOT process uptime, is the
+        correct signal for envvar tuning.
         """
         with self._state_lock:
             conv_count = len(self._conversation_cache)
@@ -195,6 +202,8 @@ class ConversationMixin(BaseClient):
             "max_turns_per_conversation": self._max_turns_per_conversation,
             "max_conversations": self._max_conversations,
             "max_chars_per_turn": self._max_chars_per_turn,
+            "cache_created_at": int(self._cache_created_at),
+            "cache_age_seconds": int(time.time() - self._cache_created_at),
         }
 
     def get_conversation_id(self, notebook_id: str) -> str | None:

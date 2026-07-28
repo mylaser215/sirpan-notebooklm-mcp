@@ -6,7 +6,7 @@ from typing import Any, cast
 
 from notebooklm_tools import __version__
 
-from ._utils import logged_tool
+from ._utils import logged_tool, peek_client
 
 
 def _get_latest_pypi_version() -> str | None:
@@ -72,4 +72,41 @@ def server_info() -> dict[str, Any]:
         "update_available": update_available,
         "update_command": "uv tool upgrade notebooklm-mcp-cli",
         "pip_update_command": "pip install --upgrade notebooklm-mcp-cli",
+    }
+
+
+@logged_tool()
+def conversation_cache_stats() -> dict[str, Any]:
+    """Introspect the running MCP server's in-memory conversation cache.
+
+    Reports live usage of the bounded follow-up-query cache and its caps
+    (NOTEBOOKLM_CONVERSATION_MAX_TURNS / _MAX_CONVS / _MAX_CHARS_PER_TURN),
+    plus cache_age_seconds — how long the current client instance (and thus
+    its cache) has lived. reset_client() drops the client only when the
+    refresh_auth tool succeeds or the profile switches; in-place Layer 2/3
+    (401 reactive) recovery preserves the cache. So a small age means a recent
+    explicit reset, not mere idleness.
+
+    Side-effect-free: never creates a client or triggers authentication.
+    If no query has run since server start / last auth refresh, returns
+    cache_active=False.
+
+    Returns:
+        dict with cache_active plus (when active) conversations, total_turns,
+        the three cap values, cache_created_at (epoch) and cache_age_seconds.
+    """
+    client = peek_client()
+    if client is None:
+        return {
+            "status": "success",
+            "cache_active": False,
+            "message": (
+                "No client instance yet — no query has run since server start "
+                "or the last auth refresh, so the conversation cache is empty."
+            ),
+        }
+    return {
+        "status": "success",
+        "cache_active": True,
+        **client.get_conversation_cache_stats(),
     }

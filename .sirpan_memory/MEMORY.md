@@ -4,10 +4,10 @@
 - 세션아카이브: `000-시스템/070-세션로그/notebooklm-mcp_세션아카이브.md`
 - 타임라인: `000-시스템/070-세션로그/notebooklm-mcp_작업타임라인.md`
 
-## 현재 상태 (260727 세션75)
+## 현재 상태 (260728 세션76)
 - **NotebookLM MCP v0.5.23** — Python/uv/FastMCP, 포트 9472, editable(-e) 설치(세션72 — 소스 수정 시 재설치 불필요)
 - GitHub: mylaser215/sirpan-notebooklm-mcp (fork from jacob-bd/notebooklm-mcp-cli)
-- 회귀 영구 가드 **1052 PASS** Green (세션75 single-flight +5 포함)
+- 회귀 영구 가드 **1056 PASS** Green (세션76 캐시 stats 관측 인프라 +4 포함)
 - v8 허브 2종 모두 💎 done-keep 졸업 (전 항목 `[x]`, detect_drift 159소스 0잔재·0모호 클린)
 - **인증 안정화(세션70~75)**: fchmod 0o600 + 좀비Chrome청소(`_cleanup_zombie_chrome`) + RTS 선제갱신(`_maybe_proactive_rts_refresh`) + about:blank 네비 레이스 픽스(세션74) + **headless single-flight**(세션75 — `cdp.py` 모듈 락으로 refresh_auth 우회 이중 Chrome 레이스 근본차단, NLM+신드리 합의). cold(장기idle) 복구 `nlm login` hang 1건 감시중(`260720-153726`)
 - ⚠️ 상세 세션별 이력은 세션아카이브·타임라인 참조 (본 MEMORY는 포인터만)
@@ -25,8 +25,8 @@
 - `260523-015000-media-source-expansion-plan`: NLM 멀티미디어 소스 확장 (별 세션 단서 캡쳐 후 시공)
 
 ## 최근 세션
+- 세션76 (260728): todo3 conversation cache stats 관측 인프라 시공(이단시공) — `conversation_cache_stats` MCP tool + `cache_created_at`/`cache_age_seconds`(신드리: reset_client가 refresh_auth tool·프로필전환 시만 캐시drop, 캐시나이가 uptime보다 진짜 튜닝신호). 3자자문으로 todo2 핸드오프·todo4 재현선행 판정 + 신드리 사후개선 3건. 1056 PASS. 실tool 관측은 서버 재기동+`/exit` 재접속 후
 - 세션75 (260727): refresh_auth 이중 headless Chrome 레이스 근본치료 — `cdp.py` 모듈 single-flight(`run_headless_auth`→`_run_headless_auth_impl` rename + wrapper, 결과공유·좀비가드90s). NLM 원안(클래스변수승격) 신드리 실측 반박(섀도잉 no-op)으로 기각→모듈락 합의. SOURCE_LIMIT_GUARD 감시 todo 청산. 1052 PASS (작업dir 미커밋)
 - 세션74 (260721): headless 자동재인증 about:blank 네비 레이스 근본치료 — `c22776b`
 - 세션72 (260720): RTS 선제갱신 `_maybe_proactive_rts_refresh` + editable(-e) 빌드 전환 — 1043 PASS. `6aed973`·`24a38f1`
 - 세션71 (260719): Windows 좀비 Chrome 청소 `_cleanup_zombie_chrome`(`nlm login --clear` 반복 근본치료, SingletonLock은 POSIX전용) — 1037 PASS. `0ce10b2`
-- 세션70 (260715): fchmod로 자격증명 0o600 복원(upstream f2fb921 write-then-chmod 회귀) — 1029 PASS. `448700d`

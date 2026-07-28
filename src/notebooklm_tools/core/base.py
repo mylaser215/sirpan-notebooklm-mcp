@@ -352,6 +352,15 @@ class BaseClient:
             "NOTEBOOKLM_CONVERSATION_MAX_CHARS_PER_TURN", default=100_000
         )
         self._conversation_cache: OrderedDict[str, list[ConversationTurn]] = OrderedDict()
+        # Wall-clock birth time of this client instance (== birth of its cache).
+        # reset_client() (mcp/tools/_utils.py) drops the singleton only when the
+        # refresh_auth tool succeeds or the profile switches — in-place Layer 2/3
+        # (401 reactive) recovery reuses this instance and PRESERVES the cache
+        # (base.py `_try_reload_or_headless_auth`). So the cache can outlive many
+        # auth events, though it is still usually shorter-lived than process
+        # uptime. Exposed via get_conversation_cache_stats() as cache_age_seconds
+        # so tuning decisions can see the true cache age, not the process age.
+        self._cache_created_at: float = time.time()
 
         # Request counter for _reqid parameter (required for query endpoint)
         self._reqid_counter = random.randint(100000, 999999)

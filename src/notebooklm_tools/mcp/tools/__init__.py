@@ -28,7 +28,7 @@ from .research import (
     research_start,
     research_status,
 )
-from .server import server_info
+from .server import conversation_cache_stats, server_info
 from .sharing import (
     notebook_share_batch,
     notebook_share_invite,
@@ -95,8 +95,9 @@ __all__ = [
     "export_artifact",
     # Notes (1 consolidated)
     "note",
-    # Server (1)
+    # Server (2)
     "server_info",
+    "conversation_cache_stats",
     # Batch (1 consolidated — action: query|add_source|create|delete|studio)
     "batch",
     # Cross-notebook (1)
