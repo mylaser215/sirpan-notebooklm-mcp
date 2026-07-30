@@ -128,7 +128,7 @@ codex exec --sandbox danger-full-access "nlm notebook list"
 ```
 
 **Solution for Docker/Containers:**
-Ensure the container has network access and can reach `notebooklm.google.com`.
+Ensure the container has network access and can reach `notebook.google.com` (and `notebooklm.google.com`, which redirects to it).
 
 ### Rate Limiting
 

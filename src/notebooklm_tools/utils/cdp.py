@@ -906,8 +906,17 @@ def navigate_to_url(ws_url: str, url: str) -> None:
 
 
 def _is_notebooklm_url(url: str) -> bool:
-    """Check if a URL belongs to any NotebookLM domain (personal or enterprise)."""
-    return "notebooklm.google.com" in url or "notebooklm.cloud.google.com" in url
+    """Check if a URL belongs to any NotebookLM domain (personal or enterprise).
+
+    Gemini Notebook 리브랜딩으로 personal 도메인이
+    notebooklm.google.com → notebook.google.com 으로 서버 리다이렉트된다
+    (2026-07 실측). 신·구 personal 도메인과 enterprise 도메인을 모두 인정한다.
+    """
+    return (
+        "notebook.google.com" in url
+        or "notebooklm.google.com" in url
+        or "notebooklm.cloud.google.com" in url
+    )
 
 
 def is_logged_in(url: str) -> bool:

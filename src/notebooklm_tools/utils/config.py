@@ -21,8 +21,9 @@ STORAGE_DIR_NAME = ".notebooklm-mcp-cli"
 
 
 _ALLOWED_BASE_HOSTS = {
-    "notebooklm.google.com",
-    "notebooklm.cloud.google.com",
+    "notebook.google.com",  # Gemini Notebook 리브랜딩 후 personal 도메인 (2026-07)
+    "notebooklm.google.com",  # legacy personal (여전히 notebook.google.com 으로 리다이렉트)
+    "notebooklm.cloud.google.com",  # enterprise
 }
 
 

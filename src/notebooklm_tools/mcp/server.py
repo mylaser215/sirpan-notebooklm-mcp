@@ -43,7 +43,7 @@ def _env_bool(name: str, default: bool = False) -> bool:
 # Initialize MCP server
 mcp = FastMCP(
     name="notebooklm",
-    instructions="""NotebookLM MCP - Access NotebookLM (notebooklm.google.com).
+    instructions="""NotebookLM MCP - Access NotebookLM / Gemini Notebook (notebook.google.com, 구 notebooklm.google.com).
 
 **Auth:** If you get authentication errors, run `nlm login` via your Bash/terminal tool. This is the automated authentication method that handles everything. Only use save_auth_tokens as a fallback if the CLI fails.
 **Account Switching:** To switch Google Accounts for the MCP server, run `nlm login switch <profile>` in Bash. The MCP server instantly uses the active default profile.

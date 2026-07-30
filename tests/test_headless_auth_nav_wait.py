@@ -112,3 +112,40 @@ def test_get_current_url_exception_is_fail_open(monkeypatch):
     monkeypatch.setattr(cdp_module, "get_current_url", _url)
     tokens = cdp_module.run_headless_auth(port=9223)
     assert tokens is not None, "예외 후 정착했는데 None = fail-open 회귀"
+
+
+# ---------------------------------------------------------------------------
+# 도메인 리브랜딩 회귀 가드 (2026-07 라이브 실측)
+#
+# 근본원인: NotebookLM이 personal 도메인을
+#     notebooklm.google.com → notebook.google.com ("Gemini Notebook")
+# 으로 서버 리다이렉트했다. is_logged_in()이 옛 도메인 문자열만 검사하면
+# 로그인이 멀쩡해도 새 도메인 URL을 "미로그인"으로 오판 → nlm login /
+# headless auth가 영원히 'Login timeout'으로 실패(라이브 재현 확정).
+# 본 테스트가 깨지면 그 전멸이 회귀한다.
+# ---------------------------------------------------------------------------
+
+
+def test_is_logged_in_recognizes_rebranded_domain():
+    """신·구 personal + enterprise 도메인을 모두 로그인으로 인정해야 한다."""
+    # 신 personal (Gemini Notebook 리브랜딩)
+    assert cdp_module.is_logged_in("https://notebook.google.com/") is True
+    assert cdp_module.is_logged_in("https://notebook.google.com/notebook/abc123") is True
+    # 구 personal (여전히 리다이렉트 진입점으로 유효)
+    assert cdp_module.is_logged_in("https://notebooklm.google.com/") is True
+    # enterprise
+    assert cdp_module.is_logged_in("https://notebooklm.cloud.google.com/") is True
+
+
+def test_is_logged_in_rejects_non_login_urls():
+    """accounts 리다이렉트(미로그인)와 무관 도메인은 False여야 한다."""
+    assert cdp_module.is_logged_in("https://accounts.google.com/signin") is False
+    assert cdp_module.is_logged_in("https://example.com/") is False
+
+
+def test_headless_auth_settles_on_rebranded_domain(monkeypatch):
+    """headless가 notebook.google.com으로 정착하면 tokens 반환 (리브랜딩 통합 방어)."""
+    _wire_common(monkeypatch, ["about:blank", "https://notebook.google.com/"])
+    tokens = cdp_module.run_headless_auth(port=9223)
+    assert tokens is not None, "notebook.google.com 정착했는데 None = 리브랜딩 도메인 회귀"
+    assert tokens.csrf_token == "csrf"

@@ -163,7 +163,7 @@ def extract_tokens_via_chrome_devtools() -> AuthTokens | None:
 
     This function assumes Chrome DevTools MCP is available and connected
     to a Chrome browser. It will:
-    1. Navigate to notebooklm.google.com
+    1. Navigate to notebook.google.com (구 notebooklm.google.com)
     2. Check if logged in
     3. If not, wait for user to log in
     4. Extract cookies and CSRF token
