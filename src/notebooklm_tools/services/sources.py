@@ -1,12 +1,13 @@
 """Sources service — shared validation and logic for source management."""
 
 import json
+import logging
 import subprocess
 import sys
 import tempfile
 import urllib.parse
 from pathlib import Path
-from typing import Any, Literal, TypedDict
+from typing import Any, Literal, NotRequired, TypedDict
 
 from ..core.client import NotebookLMClient
 from .errors import ServiceError, ValidationError
@@ -15,6 +16,8 @@ from .sync_helpers import (
     get_vault_root,
     load_bundle_registry,
 )
+
+logger = logging.getLogger(__name__)
 
 VALID_SOURCE_TYPES = ("url", "text", "drive", "file")
 VALID_DRIVE_DOC_TYPES = ("doc", "slides", "sheets", "pdf")
@@ -97,6 +100,10 @@ class AddSourceResult(TypedDict):
     source_type: str
     source_id: str
     title: str
+    # Set True only when a best-effort title rename (file sources) failed —
+    # optional so the required 3-field contract stays intact. Diagnostic only;
+    # not propagated to the source_replace_file response dict.
+    title_rename_failed: NotRequired[bool]
 
 
 class DriveSourceInfo(TypedDict, total=False):
@@ -280,26 +287,50 @@ def add_source(
                 wait_timeout=wait_timeout,
                 auto_wrap_to_md=auto_wrap_to_md,
             )
-            fallback_title = str(file_path).split("/")[-1]
+            _p = Path(file_path)
+            fallback_title = _p.name
             # 동명 파일 자동 폴더명 박제 (v7, 260528 ATOM-1 — drift ambiguous 차단)
-            # title 미지정 + DUP_FILENAMES_AUTO_FOLDER_TAG 매칭 시 `{basename} ({parent})` 자동 박제.
-            if not title:
-                _p = Path(file_path)
-                if _p.name in DUP_FILENAMES_AUTO_FOLDER_TAG:
-                    title = f"{_p.name} ({_p.parent.name})"
-                    fallback_title = title
+            # title 미지정 *또는* bare 파일명 고착(`title == basename`) + DUP 매칭 시
+            # `{basename} ({parent})` 재생성. bare 감지 절(세션486)은 replace 경로에서
+            # `_do_add`가 넘긴 bare preserved_title(예: "SKILL.md")이 truthy라 옛 `if not
+            # title:` 관문을 우회해 영구 고착하던 회로를 끊는다. 폴더태그 title
+            # (`SKILL.md (cross_3step_solver)`)은 `.strip() != _p.name`이라 스킵→preserve.
+            if _p.name in DUP_FILENAMES_AUTO_FOLDER_TAG and (
+                not title or title.strip() == _p.name
+            ):
+                title = f"{_p.name} ({_p.parent.name})"
+                fallback_title = title
             # title preservation (v5 결함 픽스, 260512): NLM은 add_file 시 filename을 title로 사용.
             # 사용자 지정 title 있으면 별도 rename RPC (b7Wfje) 호출. add_file은 항상 *Source-area*
             # 등록이므로 source_type 인자 생략 (None) — 일반 Source RPC 라우팅. Real Note(list_notes
             # 멤버)는 add_file로 안 들어오므로 update_note 분기 불필요. best-effort — 실패 시 main 계속.
+            # rename 실패(예외/falsy 반환)는 무음 삼키지 않고 logger.warning + 반환 dict에
+            # title_rename_failed 플래그로 관측 (세션486, dead-field 회피 위해 추출 후 주입).
+            rename_failed = False
             if title and isinstance(result, dict) and result.get("id"):
                 try:
                     renamed = client.rename_source(notebook_id, result["id"], title)
                     if renamed:
                         result["title"] = title
+                    else:
+                        rename_failed = True
+                        logger.warning(
+                            "rename_source returned falsy for source %s (title=%r)",
+                            result["id"],
+                            title,
+                        )
                 except Exception:  # noqa: BLE001 — best-effort
-                    pass
-            return _extract_result(result, "file", title or fallback_title)
+                    rename_failed = True
+                    logger.warning(
+                        "rename_source raised for source %s (title=%r)",
+                        result["id"],
+                        title,
+                        exc_info=True,
+                    )
+            extracted = _extract_result(result, "file", title or fallback_title)
+            if rename_failed:
+                extracted["title_rename_failed"] = True
+            return extracted
 
     except (ValidationError, ServiceError):
         raise

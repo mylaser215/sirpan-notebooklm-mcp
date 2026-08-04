@@ -165,6 +165,68 @@ class TestAddSource:
             wait_timeout=60,
         )
 
+    # --- 폴더태그 재생성 / bare 고착 차단 (세션486, 신드리 ●●● + NLM ●●●) -------
+
+    def test_file_bare_dup_title_regenerates_folder_tag(self, mock_client, tmp_path):
+        """replace가 넘긴 bare `SKILL.md`(title==basename) → 폴더태그 재생성.
+
+        옛 `if not title:` 관문은 truthy bare title을 우회시켜 자기고착했다.
+        확장 조건 `title.strip() == _p.name`이 그 회로를 끊는다.
+        """
+        fp = tmp_path / "SKILL.md"
+        mock_client.add_file.return_value = {"id": "src-4", "title": "SKILL.md"}
+
+        result = add_source(mock_client, "nb-1", "file", file_path=str(fp), title="SKILL.md")
+
+        expected = f"SKILL.md ({fp.parent.name})"
+        # rename RPC가 재생성된 폴더태그로 호출됨
+        assert mock_client.rename_source.call_args[0][2] == expected
+        assert result["title"] == expected
+
+    def test_file_folder_tag_title_preserved(self, mock_client, tmp_path):
+        """이미 폴더태그인 title(`SKILL.md (two_step_solver)`)은 재생성 스킵 → preserve."""
+        fp = tmp_path / "SKILL.md"
+        mock_client.add_file.return_value = {"id": "src-4", "title": "SKILL.md (two_step_solver)"}
+
+        add_source(
+            mock_client, "nb-1", "file", file_path=str(fp), title="SKILL.md (two_step_solver)"
+        )
+
+        # 재생성되지 않고 원본 폴더태그 그대로 rename
+        assert mock_client.rename_source.call_args[0][2] == "SKILL.md (two_step_solver)"
+
+    def test_file_rename_falsy_sets_flag(self, mock_client, tmp_path):
+        """rename_source falsy 반환 → title_rename_failed 플래그 (무음 삼킴 방지)."""
+        fp = tmp_path / "SKILL.md"
+        mock_client.add_file.return_value = {"id": "src-4", "title": "SKILL.md"}
+        mock_client.rename_source.return_value = None  # falsy
+
+        result = add_source(mock_client, "nb-1", "file", file_path=str(fp), title="SKILL.md")
+
+        assert result.get("title_rename_failed") is True
+
+    def test_file_rename_exception_sets_flag_no_crash(self, mock_client, tmp_path):
+        """rename_source 예외 → main 흐름 계속 + title_rename_failed 플래그 (best-effort)."""
+        fp = tmp_path / "SKILL.md"
+        mock_client.add_file.return_value = {"id": "src-4", "title": "SKILL.md"}
+        mock_client.rename_source.side_effect = RuntimeError("rename RPC boom")
+
+        result = add_source(mock_client, "nb-1", "file", file_path=str(fp), title="SKILL.md")
+
+        assert result["source_id"] == "src-4"  # 크래시 없이 반환
+        assert result.get("title_rename_failed") is True
+
+    def test_file_non_dup_name_not_regenerated(self, mock_client, tmp_path):
+        """DUP_FILENAMES 외 파일명은 재생성 미발동 + 성공 경로엔 플래그 부재."""
+        fp = tmp_path / "doc.pdf"
+        mock_client.add_file.return_value = {"id": "src-4", "title": "doc.pdf"}
+
+        result = add_source(mock_client, "nb-1", "file", file_path=str(fp))
+
+        # title 미지정 + DUP 외 → rename 미호출, 플래그 없음
+        mock_client.rename_source.assert_not_called()
+        assert "title_rename_failed" not in result
+
 
 class TestListDriveSources:
     """Test list_drive_sources function."""
@@ -634,6 +696,31 @@ class TestReplaceSourceFile:
         result = replace_source_file(mock_client, "nb-1", str(file_path))
 
         assert result["old_source_id"] == "src-skill"
+
+    def test_replace_bare_stuck_source_regenerates_folder_tag(self, mock_client, tmp_path):
+        """실 버그 재현 (세션486) — bare 고착 소스를 replace하면 폴더태그 재생성으로 자연 치유.
+
+        옛 회로: 자동매칭 exact가 bare `SKILL.md`를 잡아 preserved_title=`SKILL.md`(truthy)를
+        _do_add로 넘김 → 옛 `if not title:` 관문 우회 → add_file이 다시 bare → 영구 고착.
+        """
+        fp = tmp_path / "SKILL.md"
+        fp.write_text("content")
+
+        # NLM에 bare `SKILL.md`로 고착된 소스 (exact 매칭 대상)
+        mock_client.get_notebook_sources_with_types.return_value = [
+            {"id": "src-stuck", "title": "SKILL.md", "source_type_name": "Text"},
+        ]
+        mock_client.add_file.return_value = {"id": "src-new", "title": "SKILL.md"}
+
+        result = replace_source_file(mock_client, "nb-1", str(fp))
+
+        # 자동매칭이 bare 고착 소스를 해소하고
+        assert result["old_source_id"] == "src-stuck"
+        assert result["new_source_id"] == "src-new"
+        # 재생성된 폴더태그로 rename RPC 발화 (치유 성립)
+        expected = f"SKILL.md ({fp.parent.name})"
+        assert mock_client.rename_source.call_args[0][2] == expected
+        assert result["title"] == expected
 
     def test_auto_match_ambiguous_raises_before_delete(self, mock_client, tmp_path):
         """동일 basename 다수(ambiguous) → ValidationError, 파괴적 delete 미발동."""
