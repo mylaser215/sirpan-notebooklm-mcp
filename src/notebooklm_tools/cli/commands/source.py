@@ -63,7 +63,12 @@ def add_source(
     youtube: list[str] | None = typer.Option(  # noqa: B008
         None, "--youtube", "-y", help="YouTube URL (repeatable for bulk)"
     ),
-    file: str | None = typer.Option(None, "--file", "-f", help="Local file to upload (PDF, etc.)"),
+    file: str | None = typer.Option(
+        None,
+        "--file",
+        "-f",
+        help="Local file to upload: PDF/image/audio/video/docx/txt/md/csv/pptx/epub",
+    ),
     title: str = typer.Option("", "--title", help="Title for the source"),
     doc_type: str = typer.Option("doc", "--type", help="Drive doc type: doc, slides, sheets, pdf"),
     wait: bool = typer.Option(False, "--wait", "-w", help="Wait for source processing to complete"),

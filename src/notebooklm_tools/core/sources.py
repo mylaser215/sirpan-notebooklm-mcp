@@ -160,22 +160,24 @@ class SourceMixin(BaseClient):
         source_id: str,
         timeout: float = 120.0,
         poll_interval: float = 3.0,
+        error_grace_period: float = 60.0,
     ) -> dict[str, Any]:
         """Wait for a source to finish processing.
 
         Polls the source status until it becomes READY or times out.
 
-        Note on AUDIO sources (source_type 10): NotebookLM transcribes
-        audio in the cloud, and the source moves through several
-        intermediate states (5 PREPARING → 1 PROCESSING → 2 READY).
-        Empirically, source_type for an uploaded file is also reported
-        as 0 ("unknown / not yet classified") for the first few polls
-        before settling at 10 (audio) or another type. During those
-        early polls the status can briefly read 3 even on a successful
-        path. We therefore only raise on status 3 when source_type is
-        already a *known terminal* non-audio type (PDF, text, url, etc.)
-        — for audio and as-yet-unclassified sources we keep polling and
-        let the timeout surface genuine hangs.
+        Note on media sources (audio type 10 / video, plus files still
+        reported as type 0 "unclassified"): NotebookLM processes these by
+        transcribing the audio track. A file normally moves 5 PREPARING →
+        2 READY. Session-79 실측(n=3: 동요·강의·대화)에서 정상 파일은 status
+        3(ERROR)을 거치지 않았다 — 즉 지속되는 status 3은 사실상 거부 신호다.
+        다만 백엔드 STT 재시도가 성공 경로에서도 status 3을 짧게 노출할
+        가능성은 코드만으로 배제할 수 없다(표본 n=3). 이 불확실성을 헤지하려고:
+        known-terminal non-audio 타입(PDF/text/url 등)은 status 3을 즉시 실패로
+        보고, 그 외(audio/unclassified/미등록 타입)는 status 3이
+        error_grace_period를 넘겨 *지속*될 때만 실패로 판정한다. 짧은 transient는
+        유예 내 회복(1/5/2) 시 리셋되어 무해하고, 진짜 거부(무음·음성 미감지)는
+        유예 후 조기 실패로 timeout(600s) 방치를 막는다.
 
         Args:
             notebook_id: Notebook containing the source
@@ -184,6 +186,12 @@ class SourceMixin(BaseClient):
                 sources callers typically need to pass a larger value
                 — the CLI's `--wait-timeout` flag defaults to 600s)
             poll_interval: Seconds between status checks (default 3)
+            error_grace_period: audio/unclassified 소스의 status 3(ERROR)이
+                실패로 판정되기까지 허용하는 지속 시간(초, default 60). 이 유예
+                내에 status가 회복(1/5/2)되면 error_first_seen이 리셋된다. 0이면
+                유예 없이 status 3 *재관측*(최소 poll_interval 후) 시 즉시 실패
+                — 최초 관측은 기록만 하므로 실제 지연 하한은 poll_interval이다.
+                Session-79 실측(n=3) 기반이라 장시간 오디오 등에서 60초는 헤지 값.
 
         Returns:
             The source dict with status='ready'
@@ -193,6 +201,7 @@ class SourceMixin(BaseClient):
             RuntimeError: If source processing fails
         """
         start = time.time()
+        error_first_seen: float | None = None
 
         while time.time() - start < timeout:
             sources = self.get_notebook_sources_with_types(notebook_id)
@@ -202,18 +211,38 @@ class SourceMixin(BaseClient):
                     source_type = src.get("source_type")
                     if status == self.SOURCE_STATUS_READY:
                         return src
-                    # Only treat status 3 as a hard failure when the
-                    # source has already settled into a known terminal
-                    # non-audio type. Audio (10) and not-yet-classified
-                    # sources (None / 0) may pass through 3 transiently.
-                    if (
-                        status == self.SOURCE_STATUS_ERROR
-                        and source_type in self._NON_AUDIO_TERMINAL_TYPES
-                    ):
-                        raise RuntimeError(f"Source {source_id} failed to process")
+                    if status == self.SOURCE_STATUS_ERROR:
+                        # Known terminal non-audio types (PDF/text/url/...)
+                        # never pass through 3 transiently → immediate fail.
+                        if source_type in self._NON_AUDIO_TERMINAL_TYPES:
+                            raise RuntimeError(
+                                f"Source {source_id} failed to process"
+                            )
+                        # Everything else — audio(10), unclassified(0/None),
+                        # AND any type NOT in the frozenset (e.g. Drive 1/2 or
+                        # future codes) — may show a transient status 3, so we
+                        # fail only after it persists past error_grace_period.
+                        if error_first_seen is None:
+                            error_first_seen = time.time()
+                        elif time.time() - error_first_seen >= error_grace_period:
+                            raise RuntimeError(
+                                f"Source {source_id} still in error state "
+                                f"(status 3) after {error_grace_period:.0f}s — "
+                                "NLM likely rejected it (for media: no "
+                                "detectable speech/audio; otherwise unsupported "
+                                "or failed content). Re-check source status "
+                                "later if unexpected."
+                            )
+                    else:
+                        # status recovered away from ERROR (1/5) → reset grace.
+                        error_first_seen = None
                     break
             time.sleep(poll_interval)
 
+        # Gap (신드리 세션79): if NLM removes a rejected source from the list
+        # entirely, the for-loop never matches and we fall through here — grace
+        # logic needs to re-observe status 3. Session-79 observed persistent
+        # status 3, not disappearance, so this path is the pre-existing timeout.
         raise TimeoutError(f"Source {source_id} not ready after {timeout}s")
 
     def check_source_freshness(self, source_id: str) -> bool | None:
@@ -1182,58 +1211,11 @@ class SourceMixin(BaseClient):
         if file_size == 0:
             raise FileValidationError(f"File is empty: {file_path}")
 
-        # Validate file type — NLM 웹 dialog의 공식 지원 목록 (사용자 캡쳐 Image #43, 260512).
-        # 코드/구조화 데이터(.py/.json/.ts 등)는 NLM 미지원. markdown 파서는 .md에만 의미
-        # (v4 결함 후속 학습 — 추측 사고 3 박제 → 허브 운영메모 참조).
-        supported_extensions = {
-            # Documents (NLM 공식)
-            ".pdf",
-            ".txt",
-            ".md",
-            ".docx",
-            ".csv",
-            ".pptx",
-            ".epub",
-            # Audio (NLM 공식)
-            ".3g2",
-            ".3gp",
-            ".aac",
-            ".aif",
-            ".aifc",
-            ".aiff",
-            ".amr",
-            ".au",
-            ".cda",
-            ".m4a",
-            ".mid",
-            ".mp3",
-            ".mpeg",
-            ".ogg",
-            ".opus",
-            ".ra",
-            ".ram",
-            ".snd",
-            ".wav",
-            ".wma",
-            # Video (NLM 공식)
-            ".avi",
-            ".mp4",
-            # Images (NLM 공식)
-            ".avif",
-            ".bmp",
-            ".gif",
-            ".heic",
-            ".heif",
-            ".ico",
-            ".jp2",
-            ".jpe",
-            ".jpeg",
-            ".jpg",
-            ".png",
-            ".tif",
-            ".tiff",
-            ".webp",
-        }
+        # Validate file type — SSOT: constants.SUPPORTED_FILE_EXTS.
+        # NLM 웹 dialog 공식 지원 목록 (사용자 캡쳐 Image #43, 260512). 코드/구조화
+        # 데이터(.py/.json/.ts 등)는 NLM 미지원 → auto_wrap_to_md 경로로만 우회.
+        # (세션79: services/sources.py와의 복붙 이중정의를 constants SSOT로 통합.)
+        supported_extensions = constants.SUPPORTED_FILE_EXTS
         file_extension = file_path.suffix.lower()
         # ATOM-2 (260515): auto_wrap_to_md routes unsupported extensions through
         # a deterministic ``{stem}{ext}.md`` temp file so NLM's markdown parser

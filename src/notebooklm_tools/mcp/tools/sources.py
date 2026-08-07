@@ -37,7 +37,7 @@ def source_add(
             - url: Web page or YouTube URL
             - text: Pasted text content
             - drive: Google Drive document
-            - file: Local file upload (PDF, text, audio)
+            - file: Local file upload (PDF, images, audio, video, docx, csv, txt, md, etc.)
         url: URL to add (for source_type=url)
         urls: List of URLs to add in bulk (for source_type=url, alternative to url)
         text: Text content to add (for source_type=text)

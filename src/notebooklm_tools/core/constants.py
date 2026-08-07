@@ -178,6 +178,65 @@ SOURCE_TYPES = CodeMapper(
 )
 
 # =============================================================================
+# Supported File Extensions (local file upload) — SSOT
+# =============================================================================
+# NLM 웹 dialog 공식 지원 목록 (사용자 캡쳐 Image #43, 260512 v4 결함 학습).
+# core/sources.py:add_file 게이트와 services/sources.py replace pre-check 양쪽이
+# 이 단일 정의를 import해 참조한다 (과거 두 곳 복붙 → drift 위험 제거, 세션79).
+# 코드/구조화 데이터(.py/.json/.ts)는 NLM 미지원 → auto_wrap_to_md 경로로만 우회.
+SUPPORTED_FILE_EXTS = frozenset(
+    {
+        # Documents
+        ".pdf",
+        ".txt",
+        ".md",
+        ".docx",
+        ".csv",
+        ".pptx",
+        ".epub",
+        # Audio
+        ".3g2",
+        ".3gp",
+        ".aac",
+        ".aif",
+        ".aifc",
+        ".aiff",
+        ".amr",
+        ".au",
+        ".cda",
+        ".m4a",
+        ".mid",
+        ".mp3",
+        ".mpeg",
+        ".ogg",
+        ".opus",
+        ".ra",
+        ".ram",
+        ".snd",
+        ".wav",
+        ".wma",
+        # Video
+        ".avi",
+        ".mp4",
+        # Images
+        ".avif",
+        ".bmp",
+        ".gif",
+        ".heic",
+        ".heif",
+        ".ico",
+        ".jp2",
+        ".jpe",
+        ".jpeg",
+        ".jpg",
+        ".png",
+        ".tif",
+        ".tiff",
+        ".webp",
+    }
+)
+
+# =============================================================================
 # Studio Types
 # =============================================================================
 STUDIO_TYPE_AUDIO = 1

@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
 
 from ..core.client import NotebookLMClient
+from ..core.constants import SUPPORTED_FILE_EXTS
 from .errors import ServiceError, ValidationError
 from .sync_helpers import (
     _should_skip_bundle_upload,
@@ -33,60 +34,9 @@ DRIVE_MIME_TYPES = {
     "pdf": "application/pdf",
 }
 
-# Mirrors the supported_extensions check in core/sources.py:add_file.
-# NLM 공식 지원 목록 (사용자 캡쳐 Image #43, 260512 v4 결함 학습 — 허브 참조).
-# 두 곳 일치 강제 (Pre-check pattern). 코드/구조화 데이터(.py/.json/.ts)는 NLM 미지원.
-SUPPORTED_FILE_EXTS = frozenset(
-    {
-        # Documents (NLM 공식)
-        ".pdf",
-        ".txt",
-        ".md",
-        ".docx",
-        ".csv",
-        ".pptx",
-        ".epub",
-        # Audio (NLM 공식)
-        ".3g2",
-        ".3gp",
-        ".aac",
-        ".aif",
-        ".aifc",
-        ".aiff",
-        ".amr",
-        ".au",
-        ".cda",
-        ".m4a",
-        ".mid",
-        ".mp3",
-        ".mpeg",
-        ".ogg",
-        ".opus",
-        ".ra",
-        ".ram",
-        ".snd",
-        ".wav",
-        ".wma",
-        # Video (NLM 공식)
-        ".avi",
-        ".mp4",
-        # Images (NLM 공식)
-        ".avif",
-        ".bmp",
-        ".gif",
-        ".heic",
-        ".heif",
-        ".ico",
-        ".jp2",
-        ".jpe",
-        ".jpeg",
-        ".jpg",
-        ".png",
-        ".tif",
-        ".tiff",
-        ".webp",
-    }
-)
+# SUPPORTED_FILE_EXTS는 core.constants SSOT에서 import (상단). replace_source_file의
+# pre-check(파괴적 delete 전 확장자 검사로 orphan 방지)와 아래 자동 폴더명 박제가 공용.
+# 세션79: 과거 이 자리에 있던 복붙 frozenset을 core.constants 단일 정의로 통합.
 
 # 동명 파일 다폴더 자동 폴더명 박제 대상 (v7, 260528 ATOM-1)
 # title 미지정 + 본 frozenset 매칭 시 add_source가 자동으로 `{basename} ({parent_folder})` 형태 박제.
