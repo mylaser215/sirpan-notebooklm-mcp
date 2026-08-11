@@ -77,7 +77,15 @@ def _should_skip_bundle_upload(vault_root: Path, bundle_files: list[Path]) -> bo
 
 
 SKIP_DIRS: frozenset[str] = frozenset(
-    {".obsidian", ".smart-env", ".trash", "_archive", ".git"}
+    {
+        ".obsidian", ".smart-env", ".trash", "_archive", ".git",
+        # 빌드/캐시/의존성 노이즈 — 정당 소스가 존재할 수 없는 산출 디렉토리.
+        # `.pytest_cache/README.md`가 sirpan-tools prio 안에 함께 잡혀
+        # `_narrow_by_priority`의 len==1 조기반환을 붕괴시켜 README.md ambiguous를
+        # 유발한 근본원인 (세션492, NLM ●●●+신드리 ●●○ 실측). 나머지는 재발 방어.
+        ".pytest_cache", ".mypy_cache", ".ruff_cache", "__pycache__",
+        "node_modules", ".venv", "venv",
+    }
 )
 
 EXTERNAL_FILE_MAP: dict[str, Path] = {
