@@ -14,6 +14,7 @@ from ..core.constants import SUPPORTED_FILE_EXTS
 from .errors import ServiceError, ValidationError
 from .sync_helpers import (
     _should_skip_bundle_upload,
+    expand_bundle_files,
     get_vault_root,
     load_bundle_registry,
 )
@@ -1136,6 +1137,29 @@ _BUNDLE_TOOL_SCRIPT = (
 _DEFAULT_BUNDLE_MAX_WORDS = 100_000
 
 
+def _bundle_source_exists(
+    client: NotebookLMClient, notebook_id: str, bundle_name: str
+) -> bool:
+    """NLM 노트북에 이 번들의 소스(``{name}.md`` 또는 ``{name}_partN``)가
+    실존하는지 확인 (세션493).
+
+    조회 실패 시 ``False`` 반환 — fail-safe: 부재로 간주해 업로드 진행(불확실
+    → 업로드). ``_should_skip_bundle_upload``(git 무변경)와 AND 결합되어,
+    신규 번들 첫 생성(원본이 앵커보다 오래됨)이 origin diff 0으로 영영 skip되던
+    엣지케이스를 막는다.
+    """
+    stub = f"{bundle_name}.md"
+    part_prefix = f"{bundle_name}_part"
+    try:
+        for src in client.get_notebook_sources_with_types(notebook_id):
+            t = src.get("title")
+            if isinstance(t, str) and (t == stub or t.startswith(part_prefix)):
+                return True
+    except Exception:
+        return False
+    return False
+
+
 def sync_bundle(
     client: NotebookLMClient,
     notebook_id: str,
@@ -1197,8 +1221,17 @@ def sync_bundle(
             user_message=f"Bundle '{bundle_name}' has no files",
         )
 
-    # 2. Pre-flight origin existence (fail-close before NLM is touched)
-    abs_files = [Path(f).resolve() for f in files]
+    # 2. Pre-flight origin existence (fail-close before NLM is touched).
+    #    glob 지원 (세션493): registry `files` 항목의 `*` 확장 → 폴더 전체 자동
+    #    편입 (예: `회차아카이브/*.md` 1줄로 신규 회차 무편집 편입). glob 확장분은
+    #    실존 파일만 산출하므로 missing_origins는 리터럴 경로만 잡는다.
+    abs_files = [p.resolve() for p in expand_bundle_files([str(f) for f in files])]
+    if not abs_files:
+        raise ValidationError(
+            f"Bundle '{bundle_name}' expanded to zero files",
+            user_message=f"Bundle '{bundle_name}' has no matching files on disk.",
+            hint="glob 패턴이 아무 파일도 매칭하지 못했을 수 있음 (registry files 확인).",
+        )
     missing_origins = [str(p) for p in abs_files if not p.exists()]
     if missing_origins:
         raise ValidationError(
@@ -1212,7 +1245,13 @@ def sync_bundle(
     # 2.5 git churn skip (v10 I/O 병목) — 원본이 앵커 이후 변경 없으면 가장 무거운
     #     bundle 렌더(subprocess) + NLM 조회/업로드를 원천 회피. origin 존재
     #     확인(fail-close) *뒤*에 두어 깨진 경로 은폐를 막는다 (NLM Q1 ●●●).
-    if _should_skip_bundle_upload(get_vault_root(), abs_files):
+    #     단, git 무변경이어도 **NLM에 번들 소스가 실존할 때만** skip한다 —
+    #     신규 번들 첫 생성(원본이 앵커보다 오래됨)은 origin diff가 0이라 영영
+    #     skip되던 엣지케이스 방어 (세션493 신드리 ●●●). fail-safe: 소스 조회
+    #     실패·부재 시 build 진행(불확실 → 업로드), 이 함수의 fail-safe 헌장 정합.
+    if _should_skip_bundle_upload(get_vault_root(), abs_files) and _bundle_source_exists(
+        client, notebook_id, bundle_name
+    ):
         return {
             "notebook_id": notebook_id,
             "bundle_name": bundle_name,

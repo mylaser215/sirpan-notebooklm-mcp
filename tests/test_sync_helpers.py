@@ -65,6 +65,55 @@ def test_detect_drift_matched_single(vault_with_files: Path) -> None:
     assert report["matched"][0]["markdown_relevant"] is True
 
 
+def test_detect_drift_bundle_origin_dup(vault_with_files: Path) -> None:
+    """번들 registry 등재 원본이 낱개 소스로 올라오면 bundle_origin_dup 분류 (세션493).
+
+    라우팅 규칙 미준수 재발(번들 전속 원본이 낱개로 재업로드)을 detect_drift가
+    사후 포착 — 기존엔 matched로 silent 통과하던 사각. matched로 새지 않아야 함.
+    """
+    import json
+
+    essay = vault_with_files / "500-지식정원" / "essay.md"
+    reg = vault_with_files / "reg.json"
+    reg.write_text(
+        json.dumps({"bundles": {"Some_Bundle": {"domain": "t", "files": [str(essay)]}}}),
+        encoding="utf-8",
+    )
+    fetcher = _make_fetcher([
+        {"id": "dup1", "title": "essay.md", "source_type_name": "generated_text"},
+    ])
+    report = detect_drift(
+        fetcher, "nb1", vault_root=vault_with_files, bundle_registry_path=reg
+    )
+
+    assert len(report["bundle_origin_dup"]) == 1
+    assert report["bundle_origin_dup"][0]["source_id"] == "dup1"
+    assert report["bundle_origin_dup"][0]["status"] == "bundle_origin_dup"
+    assert len(report["matched"]) == 0  # matched로 새지 않음
+    # 요약에 🔴 경고 노출
+    assert "번들원본 낱개중복" in format_drift_summary(report)
+
+
+def test_detect_drift_bundle_origin_dup_glob(vault_with_files: Path) -> None:
+    """glob 패턴(`*.md`) registry 원본도 확장되어 낱개 재업로드를 포착 (세션493 ④)."""
+    import json
+
+    reg = vault_with_files / "reg_glob.json"
+    pat = str(vault_with_files / "500-지식정원" / "*.md")
+    reg.write_text(
+        json.dumps({"bundles": {"G_Bundle": {"domain": "t", "files": [pat]}}}),
+        encoding="utf-8",
+    )
+    fetcher = _make_fetcher([
+        {"id": "dupg", "title": "essay.md", "source_type_name": "generated_text"},
+    ])
+    report = detect_drift(
+        fetcher, "nb1", vault_root=vault_with_files, bundle_registry_path=reg
+    )
+    assert len(report["bundle_origin_dup"]) == 1
+    assert report["bundle_origin_dup"][0]["source_id"] == "dupg"
+
+
 def test_detect_drift_missing(vault_with_files: Path) -> None:
     """Title with no disk file → missing (NLM 잔재)."""
     fetcher = _make_fetcher([

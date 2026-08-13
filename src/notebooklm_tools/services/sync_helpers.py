@@ -11,6 +11,7 @@ NLM 동기화 본 흐름의 *영구 라이브러리*. ``force_v4_resync.py``의 
 
 from __future__ import annotations
 
+import glob as _glob
 import json
 import os
 import re
@@ -73,7 +74,25 @@ def _should_skip_bundle_upload(vault_root: Path, bundle_files: list[Path]) -> bo
         return False
     if proc.returncode != 0:
         return False
-    return not proc.stdout.strip()
+    if proc.stdout.strip():
+        return False  # tracked 변경 있음 → 업로드
+    # untracked/staged 도 검사 — ``git diff <anchor>``는 **untracked 파일을
+    # 출력하지 않는다**. "신규 회차 파일 생성 → registry glob 자동 편입 →
+    # 커밋 전 sync_bundle 호출" 시 기존 원본 무변경 + 신규 파일 diff 미출력
+    # → skip 오판으로 신규 회차 누락. git status로 봉쇄 (세션493 신드리 ●●●).
+    try:
+        proc2 = subprocess.run(
+            ["git", "status", "--porcelain", "--", *rel],
+            cwd=str(vault_root),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if proc2.returncode != 0:
+        return False
+    return not proc2.stdout.strip()
 
 
 SKIP_DIRS: frozenset[str] = frozenset(
@@ -280,6 +299,7 @@ class DriftReport(TypedDict):
     matched_markdown: list[DriftEntry]  # matched 중 .md 확장자만 — 진짜 markdown 라우팅 후보
     matched_non_markdown: list[DriftEntry]  # matched 중 .py/.json/.ts 등 — plain text 정상
     matched_bundle: list[DriftEntry]  # Tier 2 N:1 번들 (registry 매칭) — Batch 3 신설
+    bundle_origin_dup: list[DriftEntry]  # 번들 원본이 낱개로 재업로드됨 (세션493 신설)
     missing: list[DriftEntry]
     ambiguous: list[DriftEntry]
     skip_type: list[DriftEntry]
@@ -297,6 +317,27 @@ class DriftReport(TypedDict):
 _BUNDLE_TITLE_RE = re.compile(
     r"^(?P<name>.+?)(?:_part(?P<part>\d+))?\.md$", re.IGNORECASE
 )
+
+
+def expand_bundle_files(files: list[str]) -> list[Path]:
+    """registry ``files`` 항목을 절대경로 Path 리스트로 확장 (glob 지원, 세션493).
+
+    항목에 glob 메타문자(``*?[``)가 있으면 :func:`glob.glob` 확장 후 **정렬**
+    (번들 렌더 순서 결정론 — RAG chunk 순서 안정). 없으면 리터럴 Path 그대로
+    (실존 여부는 호출자 Pre-flight가 판정). glob 확장분은 실존 파일만 산출하므로
+    삭제된 원본이 자동 필터된다.
+
+    sync_bundle(sources.py)의 abs_files 구성과 detect_drift의 번들 origin
+    집합 구성이 **동일 로직을 공유**하도록 하는 SSOT — registry가 ``*.md``
+    glob 1줄로 폴더 전체를 등재해도 두 경로가 같은 파일 셋을 본다.
+    """
+    out: list[Path] = []
+    for f in files:
+        if any(ch in f for ch in "*?["):
+            out.extend(Path(p) for p in sorted(_glob.glob(f)))
+        else:
+            out.append(Path(f))
+    return out
 
 
 def _default_bundle_registry_path() -> Path:
@@ -368,11 +409,26 @@ def detect_drift(
     sources = sources_fetcher(notebook_id)
     matched: list[DriftEntry] = []
     matched_bundle: list[DriftEntry] = []
+    bundle_origin_dup: list[DriftEntry] = []
     missing: list[DriftEntry] = []
     ambiguous: list[DriftEntry] = []
     skip_type: list[DriftEntry] = []
 
     bundle_registry = load_bundle_registry(bundle_registry_path)
+    # 번들 원본 flat 집합 (glob 확장·정규화) — 낱개 재업로드 사후 감지용.
+    # registry에 등재된 원본이 번들이 아닌 *낱개 소스*로 본관에 올라오면
+    # (라우팅 규칙 미준수 재발) matched 대신 bundle_origin_dup으로 분류해
+    # detect_drift(⑥)가 자동 포착 (세션493 신드리 ●●● — 기존엔 matched로
+    # silent 통과해 재발을 영영 못 잡던 사각).
+    bundle_origins_all: set[str] = set()
+    for _entry in bundle_registry.values():
+        _fl = _entry.get("files") if isinstance(_entry, dict) else None
+        if isinstance(_fl, list):
+            for _p in expand_bundle_files([str(x) for x in _fl]):
+                try:
+                    bundle_origins_all.add(str(_p.resolve()).lower())
+                except OSError:
+                    bundle_origins_all.add(str(_p).lower())
 
     for s in sources:
         title = (s.get("title") or "").strip()
@@ -417,17 +473,35 @@ def detect_drift(
             and candidates[0].suffix.lower() == ".md"
         )
         if len(candidates) == 1:
-            matched.append(
-                {
-                    "source_id": sid,
-                    "title": title,
-                    "type_name": type_name,
-                    "status": "matched",
-                    "disk_path": str(candidates[0]),
-                    "candidates": [],
-                    "markdown_relevant": is_md,
-                }
-            )
+            try:
+                _disk_key = str(candidates[0].resolve()).lower()
+            except OSError:
+                _disk_key = str(candidates[0]).lower()
+            if _disk_key in bundle_origins_all:
+                # 번들 원본인데 낱개 소스로 올라옴 = 라우팅 규칙 미준수 재발
+                bundle_origin_dup.append(
+                    {
+                        "source_id": sid,
+                        "title": title,
+                        "type_name": type_name,
+                        "status": "bundle_origin_dup",
+                        "disk_path": str(candidates[0]),
+                        "candidates": [],
+                        "markdown_relevant": False,
+                    }
+                )
+            else:
+                matched.append(
+                    {
+                        "source_id": sid,
+                        "title": title,
+                        "type_name": type_name,
+                        "status": "matched",
+                        "disk_path": str(candidates[0]),
+                        "candidates": [],
+                        "markdown_relevant": is_md,
+                    }
+                )
         elif len(candidates) == 0:
             missing.append(
                 {
@@ -463,6 +537,7 @@ def detect_drift(
         "matched_markdown": matched_markdown,
         "matched_non_markdown": matched_non_markdown,
         "matched_bundle": matched_bundle,
+        "bundle_origin_dup": bundle_origin_dup,
         "missing": missing,
         "ambiguous": ambiguous,
         "skip_type": skip_type,
@@ -478,17 +553,28 @@ def format_drift_summary(report: DriftReport) -> str:
     mm = len(report["matched_markdown"])
     mn = len(report["matched_non_markdown"])
     mb = len(report.get("matched_bundle", []))
+    bod = len(report.get("bundle_origin_dup", []))
     ms = len(report["missing"])
     a = len(report["ambiguous"])
     st = len(report["skip_type"])
     parts = [
         f"📊 drift 점검: {mm} markdown(.md) / {mn} non-md(plain text 정상)"
         f" / {mb} 번들(N:1)"
+        f" / {bod} 번들원본 낱개중복"
         f" / {ms} NLM 잔재 / {a} 모호 / {st} type-skip"
     ]
-    if ms > 0 or a > 0:
+    if ms > 0 or a > 0 or bod > 0:
         parts.append(" — 청소·매핑 보강 권고")
     summary = "".join(parts)
+    if bod > 0:
+        summary += (
+            "\n  🔴 번들원본 낱개중복 (registry 등재 원본이 번들 아닌 낱개로 재업로드"
+            " — 라우팅 규칙 미준수, 낱개 source_delete 후 sync_bundle 권고):"
+        )
+        for entry in report["bundle_origin_dup"][:10]:
+            summary += f"\n    - [{entry['source_id'][:8]}] {entry['title'][:60]}"
+        if bod > 10:
+            summary += f"\n    ... +{bod - 10} more"
     if ms > 0:
         summary += "\n  NLM 잔재 (디스크 원본 없음):"
         for entry in report["missing"][:10]:

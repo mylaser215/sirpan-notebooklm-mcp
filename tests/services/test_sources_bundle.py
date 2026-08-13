@@ -377,13 +377,21 @@ def test_failsafe_empty_files(vault_with_anchor: Path) -> None:
     assert _should_skip_bundle_upload(vault_with_anchor, []) is False
 
 
-def test_sync_bundle_skips_when_unchanged(
+def test_sync_bundle_skips_when_unchanged_and_source_exists(
     mock_client: MagicMock, registry_path: Path, monkeypatch
 ) -> None:
-    """skip 판정 True → mode=='skip', NLM 전혀 안 건드림 (조회·업로드 0)."""
+    """git 무변경 AND 번들 소스 실존 → mode=='skip', 업로드 0 (세션493 계약).
+
+    이전 계약("git 무변경이면 무조건 skip")에서 "소스 실존 확인"이 추가됨 —
+    소스 실존을 mock으로 제공해야 skip 경로를 탄다.
+    """
     monkeypatch.setattr(
         sources_service, "_should_skip_bundle_upload", lambda *a, **k: True
     )
+    # 번들 소스가 NLM에 실존 → skip 허용
+    mock_client.get_notebook_sources_with_types.return_value = [
+        {"title": "Test_Bundle.md", "id": "existing-sid"}
+    ]
     result = sync_bundle(
         mock_client,
         "nb1",
@@ -397,6 +405,33 @@ def test_sync_bundle_skips_when_unchanged(
     assert result["source_id"] == ""
     assert result["source_ids"] == []
     assert result["bundled_count"] == 2
-    mock_client.add_file.assert_not_called()
-    mock_client.get_notebook_sources_with_types.assert_not_called()
+    mock_client.add_file.assert_not_called()  # 업로드 0
     mock_client.delete_source.assert_not_called()
+
+
+def test_bundle_source_exists_detection(mock_client: MagicMock) -> None:
+    """_bundle_source_exists — 실존/부재/part/조회실패(fail-safe) 4케이스 (세션493)."""
+    from notebooklm_tools.services.sources import _bundle_source_exists
+
+    # 실존 ({name}.md)
+    mock_client.get_notebook_sources_with_types.return_value = [
+        {"title": "Other.md", "id": "x"},
+        {"title": "Test_Bundle.md", "id": "s1"},
+    ]
+    assert _bundle_source_exists(mock_client, "nb1", "Test_Bundle") is True
+
+    # part 형태 매칭 ({name}_part1.md)
+    mock_client.get_notebook_sources_with_types.return_value = [
+        {"title": "Test_Bundle_part1.md", "id": "s1"}
+    ]
+    assert _bundle_source_exists(mock_client, "nb1", "Test_Bundle") is True
+
+    # 부재
+    mock_client.get_notebook_sources_with_types.return_value = [
+        {"title": "Unrelated.md", "id": "z"}
+    ]
+    assert _bundle_source_exists(mock_client, "nb1", "Test_Bundle") is False
+
+    # 조회 실패 → fail-safe False (부재 취급 → 업로드 진행)
+    mock_client.get_notebook_sources_with_types.side_effect = RuntimeError("boom")
+    assert _bundle_source_exists(mock_client, "nb1", "Test_Bundle") is False
