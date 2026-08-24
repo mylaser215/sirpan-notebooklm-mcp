@@ -205,7 +205,11 @@ def poll_research(
         "sources_found": len(result.get("sources", [])),
         "sources": sources,
         "report": report,
-        "message": "Use research_import to add sources to notebook."
+        "message": (
+            f"⚠️ {len(result.get('sources', []))} source(s) discovered but NOT yet "
+            "imported. Call research_import(notebook_id) to save them into the notebook "
+            "— they remain OUTSIDE the notebook (source_count stays 0) until you do."
+        )
         if status == "completed"
         else None,
     }
@@ -214,7 +218,8 @@ def poll_research(
 def import_research(
     client: NotebookLMClient,
     notebook_id: str,
-    task_id: str,
+    task_id: str | None = None,
+    query: str | None = None,
     source_indices: list[int] | None = None,
     timeout: float = 300.0,
 ) -> ResearchImportResult:
@@ -223,7 +228,10 @@ def import_research(
     Args:
         client: Authenticated NotebookLM client
         notebook_id: Notebook UUID
-        task_id: Research task ID
+        task_id: Research task ID (optional — auto-detects the most-recent
+            completed task in the notebook when omitted, mirroring the CLI)
+        query: Optional query text for fallback matching when task_id is
+            omitted or has mutated (deep research). Forwarded to poll_research.
         source_indices: Indices of sources to import (default: all)
         timeout: HTTP timeout in seconds (default: 300s)
 
@@ -237,6 +245,7 @@ def import_research(
         research_result = client.poll_research(
             notebook_id=notebook_id,
             target_task_id=task_id,
+            target_query=query,
         )
     except Exception as e:
         raise ServiceError(f"Failed to retrieve research results: {e}") from e

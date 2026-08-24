@@ -101,7 +101,8 @@ def research_status(
 @logged_tool()
 def research_import(
     notebook_id: str,
-    task_id: str,
+    task_id: str | None = None,
+    query: str | None = None,
     source_indices: list[int] | None = None,
     timeout: float = 300.0,
 ) -> ResultDict:
@@ -109,9 +110,16 @@ def research_import(
 
     Call after research_status shows status="completed".
 
+    task_id is OPTIONAL: when omitted, the most-recent completed research
+    task in the notebook is auto-detected (pass `query` for precise matching
+    when a notebook holds multiple research tasks). This mirrors the CLI's
+    `nlm research import` auto-detect so a lost/forgotten task_id — e.g. from
+    a research run in an earlier session — never blocks import.
+
     Args:
         notebook_id: Notebook UUID
-        task_id: Research task ID
+        task_id: Research task ID (optional — auto-detects when omitted)
+        query: Optional query text for fallback matching when task_id omitted
         source_indices: Source indices to import (default: all)
         timeout: Import timeout in seconds (default: 300, increase for large notebooks)
     """
@@ -123,6 +131,7 @@ def research_import(
             client,
             notebook_id,
             task_id,
+            query=query,
             source_indices=source_indices,
             timeout=timeout,
         )
