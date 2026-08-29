@@ -927,7 +927,9 @@ def replace_source_file(
                 ),
                 hint="source_id를 명시하거나 네트워크·인증을 확인하세요.",
             ) from e
-        source_id, preserved_title = _match_source_by_basename(sources, p.name)
+        source_id, preserved_title = _match_source_by_basename(
+            sources, p.name, p.parent.name
+        )
     else:
         try:
             for src in client.get_notebook_sources_with_types(notebook_id):
@@ -1022,28 +1024,44 @@ def replace_source_file(
 def _match_source_by_basename(
     sources: list[dict[str, Any]],
     basename: str,
+    folder_hint: str | None = None,
 ) -> tuple[str, str | None]:
     """Resolve a unique source_id from a file basename against the source list.
 
-    Deterministic 3-tier match (NLM ●●● conv 803fdca1, session 418):
+    Deterministic match (NLM ●●● conv 803fdca1, session 418; tier 1.5 session 520):
       1. Exact  — source title == ``basename``.
+      1.5. Folder-tag exact — title == ``f"{basename} ({folder_hint})"`` when a
+         folder hint is supplied. Disambiguates the N same-basename auto-folder-tag
+         titles (e.g. ``SKILL.md (brokk-debate)`` vs ``SKILL.md (suno-lyric-roulette)``)
+         that the prefix tier alone leaves ambiguous. Mirrors detect_drift's folder
+         narrowing — the missing replace↔drift symmetry was the real root cause
+         of the SKILL.md deadlock (session 520 신드리 실측).
       2. Prefix — source title startswith ``f"{basename} ("`` — defends the
          auto-folder-tag titles NLM mints for duplicate filenames, e.g.
          ``SKILL.md (two_step_solver)`` / ``nlm_seed.md (cross_3step_solver)``.
       3. Fail-close — 0 or 2+ candidates raise ``ValidationError`` carrying the
          candidate list, so the caller supplies an explicit ``source_id``.
 
-    Exact takes precedence: a non-empty exact set is used even if prefix
-    matches also exist. Returns ``(source_id, title)`` on a unique match.
-    Raised BEFORE any destructive delete (pre-check safety, same contract as
-    the file pre-checks in ``replace_source_file``).
+    Precedence: exact → folder-tag exact → prefix. A non-empty higher tier is
+    used even if lower tiers also match. Returns ``(source_id, title)`` on a
+    unique match. Raised BEFORE any destructive delete (pre-check safety, same
+    contract as the file pre-checks in ``replace_source_file``).
     """
     exact = [s for s in sources if (s.get("title") or "").strip() == basename]
+    # Tier 1.5 — folder-tag exact (session 520): disambiguates auto-folder-tag
+    # titles when N skills share a basename (SKILL.md ×N). Without it the prefix
+    # tier below matches all N → ambiguous → SKILL.md deadlock (28~520 밀림).
+    folder_exact: list[dict[str, Any]] = []
+    if folder_hint:
+        _target = f"{basename} ({folder_hint})"
+        folder_exact = [
+            s for s in sources if (s.get("title") or "").strip() == _target
+        ]
     prefix = [
         s for s in sources
         if (s.get("title") or "").strip().startswith(f"{basename} (")
     ]
-    candidates = exact or prefix
+    candidates = exact or folder_exact or prefix
     if len(candidates) == 1:
         c = candidates[0]
         sid = c.get("id") or ""

@@ -739,6 +739,43 @@ class TestReplaceSourceFile:
         mock_client.delete_source.assert_not_called()
         mock_client.add_file.assert_not_called()
 
+    def test_folder_hint_disambiguates_same_basename(self, mock_client, tmp_path):
+        """Tier 1.5 (세션520) — N개 `SKILL.md (folder)` 중 파일 부모폴더명으로 유니크 해소."""
+        skill_dir = tmp_path / "brokk-debate"
+        skill_dir.mkdir()
+        fp = skill_dir / "SKILL.md"
+        fp.write_text("content")
+
+        mock_client.get_notebook_sources_with_types.return_value = [
+            {"id": "s-brokk", "title": "SKILL.md (brokk-debate)", "source_type_name": "Text"},
+            {"id": "s-roul", "title": "SKILL.md (suno-lyric-roulette)", "source_type_name": "Text"},
+            {"id": "s-cross", "title": "SKILL.md (cross_3step_solver)", "source_type_name": "Text"},
+        ]
+        mock_client.add_file.return_value = {"id": "s-new", "title": "SKILL.md (brokk-debate)"}
+
+        result = replace_source_file(mock_client, "nb-1", str(fp))
+
+        # 폴더힌트로 유니크 해소 — ambiguous 미발생, 정확한 소스만 교체
+        assert result["old_source_id"] == "s-brokk"
+        mock_client.delete_source.assert_called_once()
+
+    def test_folder_hint_no_match_falls_to_prefix_ambiguous(self, mock_client, tmp_path):
+        """폴더힌트가 어느 title과도 안 맞으면 prefix tier로 폴백 — 다수면 여전히 fail-close."""
+        skill_dir = tmp_path / "unknown-skill"
+        skill_dir.mkdir()
+        fp = skill_dir / "SKILL.md"
+        fp.write_text("content")
+
+        mock_client.get_notebook_sources_with_types.return_value = [
+            {"id": "s1", "title": "SKILL.md (brokk-debate)", "source_type_name": "Text"},
+            {"id": "s2", "title": "SKILL.md (suno-lyric-roulette)", "source_type_name": "Text"},
+        ]
+
+        with pytest.raises(ValidationError, match="auto-match"):
+            replace_source_file(mock_client, "nb-1", str(fp))
+
+        mock_client.delete_source.assert_not_called()
+
     def test_auto_match_fetch_failure_raises_service_error(self, mock_client, tmp_path):
         """source_id=None인데 소스목록 조회 실패 → 묵음실패 금지, ServiceError (함정1)."""
         file_path = tmp_path / "doc.txt"
