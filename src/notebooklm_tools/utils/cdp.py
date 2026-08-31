@@ -492,6 +492,73 @@ def is_profile_locked(profile_name: str = "default") -> bool:
     return lock_file.exists()
 
 
+# Chromium-family process-name tokens used as a cheap pre-filter in
+# _cleanup_zombie_chrome. The authoritative kill decision is always the exact
+# --user-data-dir match (_holds_profile), so a browser on a different profile
+# (e.g. the user's real Brave kept on 9222 for suno CDP) is never killed even
+# though its name matches here. Chrome-only tokens previously skipped brave.exe /
+# msedge.exe, breaking zombie self-heal on those browsers (forced nlm login
+# --clear loop).
+_CHROMIUM_PROC_NAME_TOKENS = ("chrome", "chromium", "brave", "msedge", "vivaldi", "opera")
+
+
+def _cmdline_holds_user_data_dir(cmdline: "list[str] | None", target_norm: str) -> bool:
+    """True iff ``cmdline`` sets ``--user-data-dir`` equal to ``target_norm``.
+
+    ``target_norm`` must already be normalized via ``os.path.normcase(normpath(...))``.
+    Handles both ``--user-data-dir=<path>`` and ``--user-data-dir <path>`` forms.
+    """
+    if not cmdline:
+        return False
+    for i, arg in enumerate(cmdline):
+        if arg.startswith("--user-data-dir="):
+            if os.path.normcase(os.path.normpath(arg.split("=", 1)[1])) == target_norm:
+                return True
+        elif arg == "--user-data-dir" and i + 1 < len(cmdline):
+            if os.path.normcase(os.path.normpath(cmdline[i + 1])) == target_norm:
+                return True
+    return False
+
+
+def _cdp_port_uses_profile(port: int, profile_dir: Path) -> bool:
+    """True iff the process LISTENing on ``port`` runs with ``--user-data-dir == profile_dir``.
+
+    Gate for :func:`find_any_existing_cdp_browser` reuse: without it, that fallback
+    would hijack any foreign CDP browser sharing our scan range — most dangerously
+    the user's real Brave kept on 9222 for suno — and extract cookies from their
+    live Google session, which can invalidate that session. **Fail-closed**: any
+    uncertainty (no psutil, permission denied, port not found) returns False so we
+    launch our own isolated sandbox instead of touching someone else's browser.
+    """
+    try:
+        import psutil
+    except ImportError:  # pragma: no cover - psutil is a declared dependency
+        return False
+    target = os.path.normcase(os.path.normpath(str(profile_dir)))
+    try:
+        for conn in psutil.net_connections(kind="inet"):
+            laddr = getattr(conn, "laddr", None)
+            if not laddr or getattr(laddr, "port", None) != port:
+                continue
+            if conn.status != psutil.CONN_LISTEN or not conn.pid:
+                continue
+            try:
+                proc = psutil.Process(conn.pid)
+                chain = [proc] + proc.parents()
+            except (psutil.NoSuchProcess, psutil.AccessDenied):
+                return False
+            for p in chain:
+                try:
+                    if _cmdline_holds_user_data_dir(p.cmdline(), target):
+                        return True
+                except (psutil.NoSuchProcess, psutil.AccessDenied):
+                    continue
+            return False
+    except Exception:
+        return False
+    return False
+
+
 def _cleanup_zombie_chrome(profile_dir: Path) -> int:
     """Kill stale Chrome processes holding ``profile_dir``, then clear POSIX lock.
 
@@ -542,7 +609,7 @@ def _cleanup_zombie_chrome(profile_dir: Path) -> int:
         for proc in psutil.process_iter(["name", "cmdline"]):
             try:
                 name = (proc.info.get("name") or "").lower()
-                if "chrome" not in name and "chromium" not in name:
+                if not any(tok in name for tok in _CHROMIUM_PROC_NAME_TOKENS):
                     continue
                 if not _holds_profile(proc.info.get("cmdline") or []):
                     continue
@@ -602,12 +669,21 @@ def find_existing_nlm_chrome(
 
 def find_any_existing_cdp_browser(
     port_range: range = CDP_PORT_RANGE,
+    profile_dir: "Path | None" = None,
 ) -> tuple[int | None, str | None]:
     """Find a single reachable CDP browser in our local port range.
 
     This is a fallback for environments where the browser is already running
     with remote debugging enabled but wasn't launched by this tool, so no
     port-map entry exists yet.
+
+    When ``profile_dir`` is given, the sole match is reused **only if it runs on
+    our managed sandbox profile** (verified via :func:`_cdp_port_uses_profile`).
+    Otherwise it is a foreign browser — most dangerously the user's real Brave
+    kept on 9222 for suno — and reusing it would extract cookies from their live
+    Google session. Fail-closed: unverifiable → skip reuse and launch our own.
+    ``profile_dir=None`` preserves the legacy (ungated) behavior for callers that
+    have no managed profile context.
     """
     matches: list[tuple[int, str]] = []
     for port in port_range:
@@ -616,7 +692,15 @@ def find_any_existing_cdp_browser(
             matches.append((port, debugger_url))
 
     if len(matches) == 1:
-        return matches[0]
+        port, url = matches[0]
+        if profile_dir is not None and not _cdp_port_uses_profile(port, profile_dir):
+            _logger.info(
+                "Skipping CDP reuse on port %d — not our managed profile "
+                "(foreign browser); launching a fresh sandbox instead.",
+                port,
+            )
+            return None, None
+        return port, url
     return None, None
 
 
@@ -1006,8 +1090,10 @@ def extract_cookies_via_cdp(
     if clear_profile:
         import shutil
 
-        from notebooklm_tools.utils.config import get_chrome_profile_dir
-
+        # get_chrome_profile_dir is imported at module level (see top of file);
+        # a local re-import here would shadow it and make it a function-local name,
+        # raising UnboundLocalError at the ungated reuse call below when
+        # clear_profile is False.
         profile_dir = get_chrome_profile_dir(profile_name)
         if profile_dir.exists():
             shutil.rmtree(profile_dir, ignore_errors=True)
@@ -1019,7 +1105,9 @@ def extract_cookies_via_cdp(
     if not clear_profile:
         existing_port, debugger_url = find_existing_nlm_chrome(profile_name=profile_name)
         if not debugger_url:
-            existing_port, debugger_url = find_any_existing_cdp_browser()
+            existing_port, debugger_url = find_any_existing_cdp_browser(
+                profile_dir=get_chrome_profile_dir(profile_name)
+            )
 
     if existing_port:
         port = existing_port
