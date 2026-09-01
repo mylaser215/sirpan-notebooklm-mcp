@@ -191,7 +191,9 @@ def detect_drift(notebook_id: str, vault_root: str | None = None) -> ResultDict:
 
     Returns:
         report — full DriftReport TypedDict (matched / matched_markdown /
-            matched_non_markdown / missing / ambiguous / skip_type + total).
+            matched_non_markdown / matched_bundle / bundle_origin_dup /
+            dup_disk_path / stale_processed / missing / ambiguous /
+            skip_type + total).
         summary — human-friendly one-line + detail string (the same output
             previously produced by the inline ``format_drift_summary`` call).
     """

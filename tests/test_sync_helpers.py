@@ -9,6 +9,7 @@ ATOM-2 (세션44, 260521) — `detect_drift`를 MCP tool로 노출하기 전에 
 
 from __future__ import annotations
 
+import hashlib
 from pathlib import Path
 from typing import Any
 
@@ -17,6 +18,7 @@ import pytest
 from notebooklm_tools.services import sync_helpers
 from notebooklm_tools.services.sync_helpers import (
     _classify_bundle,
+    check_processed_stale,
     detect_drift,
     find_disk_path,
     format_drift_summary,
@@ -594,3 +596,112 @@ def test_find_disk_path_external_processed_tail_missing_returns_empty(
 
     result = find_disk_path("gone.ts.md", vault_root=vault)
     assert result == []
+
+
+def test_detect_drift_dup_disk_path(vault_with_files: Path) -> None:
+    """서로 다른 제목의 소스 2개가 같은 디스크 파일을 가리키면 dup_disk_path (세션540).
+
+    실 사고 재현: 본관에 `SKILL.md (suno-lyric-refine)`(폴더태그형 규약)과
+    `suno-lyric-refine/SKILL.md`(v7에서 기각된 슬래시형 잔재)가 공존해 같은 로컬
+    파일을 가리켰다. 둘 다 각자 len(candidates)==1이라 나란히 matched로 통과했고,
+    그날 detect_drift는 "잔재 0 / 모호 1"로 깨끗하게 보고했다 — 중복이 총계 안에
+    은폐된 것. source->disk 단방향 검사의 구조적 사각이다.
+    """
+    fetcher = _make_fetcher([
+        {"id": "s1", "title": "guide.md", "source_type_name": "generated_text"},
+        {"id": "s2", "title": "050-Docs/guide.md", "source_type_name": "generated_text"},
+    ])
+    report = detect_drift(fetcher, "nb1", vault_root=vault_with_files)
+
+    # 둘 다 matched에서 빠지고 dup_disk_path로 이동
+    assert len(report["dup_disk_path"]) == 2
+    assert {e["source_id"] for e in report["dup_disk_path"]} == {"s1", "s2"}
+    assert all(e["status"] == "dup_disk_path" for e in report["dup_disk_path"])
+    assert len(report["matched"]) == 0
+    # 파생 계약: matched에서 빠졌으므로 markdown 집계도 오염되지 않는다
+    assert len(report["matched_markdown"]) == 0
+    # 잔재/모호 어느 버킷도 울리지 않던 것이 이 검사의 존재 이유
+    assert len(report["missing"]) == 0
+    assert len(report["ambiguous"]) == 0
+
+    summary = format_drift_summary(report)
+    assert "2 동일파일 중복소스" in summary
+    assert "청소·매핑 보강 권고" in summary
+
+
+def test_detect_drift_dup_disk_path_clean_when_unique(vault_with_files: Path) -> None:
+    """역방향 유일성이 지켜지면 dup_disk_path는 빈 리스트 (인위 샘플 양방향 검증).
+
+    검출기가 상시 발화하는 오탐이 아님을 증명 — 세션530 false-green 학습.
+    """
+    fetcher = _make_fetcher([
+        {"id": "s1", "title": "guide.md", "source_type_name": "generated_text"},
+        {"id": "s2", "title": "essay.md", "source_type_name": "generated_text"},
+    ])
+    report = detect_drift(fetcher, "nb1", vault_root=vault_with_files)
+
+    assert report["dup_disk_path"] == []
+    assert len(report["matched"]) == 2
+    assert "0 동일파일 중복소스" in format_drift_summary(report)
+
+
+def _write_processed_artifact(src: Path, md: Path) -> None:
+    """`.{ext}.md` 가공물 1건을 규격대로 생성 (FM에 절대 source_path + 원본 해시)."""
+    digest = hashlib.sha256(src.read_bytes()).hexdigest()
+    md.write_text(
+        "---\n"
+        f"source_path: {str(src).replace(chr(92), '/')}\n"
+        "generated_at: 2026-09-02T03:00\n"
+        f"original_sha256: {digest}\n"
+        "generator: scripts/generate_code_md.py\n"
+        "---\n\n## 원본 코드\n",
+        encoding="utf-8",
+    )
+
+
+def test_detect_drift_stale_processed_detects_and_stays_clean(
+    vault_with_files: Path,
+) -> None:
+    """층3 — 가공물 내용 stale 검출 + 인위 샘플 양방향 검증 (세션540).
+
+    `detect_drift`는 원래 "디스크에 파일이 있는가"만 봐서, 원본 코드가 갱신됐는데
+    `generate_code_md.py` 재가공을 빠뜨리면 NLM에 구버전이 무음 잔존했다(층3 사각).
+    검출기가 상시 발화하는 오탐이 아님을 fresh 경로로 함께 고정한다.
+    """
+    docs = vault_with_files / "000-시스템" / "050-Docs"
+    src = docs / "thing.py"
+    src.write_text("print('v1')\n", encoding="utf-8")
+    md = docs / "thing.py.md"
+    _write_processed_artifact(src, md)
+
+    fetcher = _make_fetcher([
+        {"id": "s1", "title": "thing.py.md", "source_type_name": "generated_text"},
+    ])
+
+    # (1) fresh — 검출 없음
+    report = detect_drift(fetcher, "nb1", vault_root=vault_with_files)
+    assert report["stale_processed"] == []
+    assert len(report["matched"]) == 1
+    assert "0 가공물 내용 stale" in format_drift_summary(report)
+
+    # (2) 원본만 갱신 (재가공 누락 재현) — stale 검출
+    src.write_text("print('v2 — 재가공 누락')\n", encoding="utf-8")
+    report = detect_drift(fetcher, "nb1", vault_root=vault_with_files)
+    assert len(report["stale_processed"]) == 1
+    assert report["stale_processed"][0]["status"] == "stale"
+    assert report["stale_processed"][0]["source_id"] == "s1"
+    # 파생 뷰이므로 matched 카운트 계약은 무손상
+    assert len(report["matched"]) == 1
+    summary = format_drift_summary(report)
+    assert "1 가공물 내용 stale" in summary
+    assert "청소·매핑 보강 권고" in summary
+
+    # (3) 원본 소실 — origin_missing
+    src.unlink()
+    report = detect_drift(fetcher, "nb1", vault_root=vault_with_files)
+    assert report["stale_processed"][0]["status"] == "origin_missing"
+
+
+def test_check_processed_stale_ignores_plain_md(vault_with_files: Path) -> None:
+    """일반 `.md` 노트는 가공물이 아니므로 판정 대상 밖 (None)."""
+    assert check_processed_stale(vault_with_files / "500-지식정원" / "essay.md") is None

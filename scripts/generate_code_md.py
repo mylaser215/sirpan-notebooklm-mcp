@@ -569,7 +569,10 @@ def main() -> int:
         "--root",
         type=Path,
         default=None,
-        help="Project root for relative source_path (default: cwd)",
+        help=(
+            "Project root to make source_path relative to. Default: none — "
+            "source_path is written as an absolute path (deterministic)."
+        ),
     )
     args = parser.parse_args()
 
@@ -605,10 +608,21 @@ def main() -> int:
     parsed = parse_fn(src_path)
     body_lines = render_fn(parsed)
     timestamp = datetime.now().strftime("%Y-%m-%dT%H:%M")
-    root = args.root.resolve() if args.root else Path.cwd()
-    try:
-        source_path_rel = str(src_path.relative_to(root)).replace("\\", "/")
-    except ValueError:
+    # 세션540 — 기본값을 cwd에서 절대경로로 전환 (신드리 ●●○).
+    # 옛 기본(cwd 기준 상대화)은 *같은 파일을 어디서 실행했느냐*에 따라 FM
+    # `source_path`가 달라지는 cwd 의존이었다. 실측: 볼트 가공물 34건 중 33건은
+    # 절대경로인데 `cold_storage_gc.py.md` 1건만 `sirpan-tools/cold_storage_gc.py`
+    # 상대경로였고, 원인은 그날 그 파일만 다른 디렉터리에서 생성된 것뿐이다.
+    # 지금은 무해하나, FM `source_path`로 원본을 되찾는 소비자(층3 stale 스윕)가
+    # 생기는 순간 load-bearing이 된다 — 그래서 소비자를 짓기 전에 먼저 고정한다.
+    # `--root`를 명시하면 종전대로 상대화(호출자 의도가 있을 때만).
+    if args.root:
+        root = args.root.resolve()
+        try:
+            source_path_rel = str(src_path.relative_to(root)).replace("\\", "/")
+        except ValueError:
+            source_path_rel = str(src_path).replace("\\", "/")
+    else:
         source_path_rel = str(src_path).replace("\\", "/")
 
     rendered = render_md(

@@ -5,6 +5,7 @@ import logging
 import subprocess
 import sys
 import tempfile
+import time
 import urllib.parse
 from pathlib import Path
 from typing import Any, Literal, NotRequired, TypedDict
@@ -124,6 +125,12 @@ class ReplaceSourceFileResult(TypedDict):
     file_path: str
     message: str
     mode: Literal["file", "text"]
+    # 세션540 — best-effort rename 실패를 호출자(AI)에게 전파. 이전에는
+    # AddSourceResult에만 실려 서버 logger.warning으로만 남았고, replace 응답에는
+    # "not propagated"였다(L54-57 docstring 자백). 그 결과 rename이 튕기면 NLM에
+    # bare 제목 소스가 조용히 생기고 → 다음 동기화에서 bare 하이재킹 지뢰가 된다
+    # (층2 재개방 채널, 신드리 ●●○). 관측을 달아 무음 재생성을 끊는다.
+    title_rename_failed: NotRequired[bool]
 
 
 def validate_source_type(source_type: str) -> None:
@@ -140,6 +147,99 @@ def resolve_drive_mime_type(doc_type: str) -> str:
     Returns the MIME type string, falling back to Google Doc MIME type.
     """
     return DRIVE_MIME_TYPES.get(doc_type, DRIVE_MIME_TYPES["doc"])
+
+
+# rename 미반영 재시도 대기 (초). 테스트에서 monkeypatch로 0 주입 가능.
+RENAME_VERIFY_RETRY_DELAY_SEC = 3.0
+
+
+def _rename_source_verified(
+    client: NotebookLMClient,
+    notebook_id: str,
+    source_id: str,
+    title: str,
+) -> bool:
+    """제목 rename + **read-back 검증** + 1회 재시도 (세션540 신설).
+
+    왜 검증이 필요한가 — 세션540 라이브 실측:
+        `client.rename_source`가 **성공을 반환하고도 NLM이 제목을 버린다.** add 직후
+        (1~2초) 호출하면 RPC는 정상 응답하고 서버 로그에 경고 하나 남지 않는데,
+        13분 뒤 소스 목록을 조회하면 제목이 bare 파일명 그대로다. 같은 소스에 몇 분
+        뒤 `source_rename`을 명시 호출하면 즉시 반영된다 — 즉 add 직후의 eventual
+        consistency 창에서 rename이 조용히 유실된다.
+
+    이것이 세션525·529가 매 동기화마다 수동 `source_rename`을 반복해야 했던 현상의
+    정체다. 지금까지의 진단은 *"best-effort rename이 실패하는데 무음"*이었고 세션540의
+    1차 처방도 `title_rename_failed` 전파였으나 — **실패가 아니라 거짓 성공**이라
+    그 처방으로는 원천적으로 못 잡는다. 반환값을 믿지 않고 read-back으로 확인한다
+    (헌법 §세션 관리 *박제 직후 read-back* 원칙과 동형).
+
+    비용 억제: NLM이 add 시 부여하는 기본 제목은 파일 basename이므로, 요청 제목이
+    basename과 같으면 rename 자체가 무변경이라 검증을 건너뛴다. 실제 검증 비용은
+    폴더태그처럼 *제목을 진짜 바꾸는* 경우에만 발생한다.
+
+    Returns:
+        True — 반영 확인됨(또는 검증 불가라 best-effort로 수용).
+        False — 조회 결과 제목이 여전히 다름(재시도 후에도). 호출자는
+        ``title_rename_failed``로 전파해 운영자가 수동 복원하게 한다.
+    """
+
+    def _observed_title() -> str | None:
+        """소스 목록에서 이 source_id의 현재 제목. 조회 불가·미발견이면 None."""
+        try:
+            for src in client.get_notebook_sources_with_types(notebook_id):
+                if src.get("id") == source_id:
+                    observed = src.get("title")
+                    return observed if isinstance(observed, str) else ""
+        except Exception:  # noqa: BLE001 — 검증은 best-effort
+            return None
+        return None
+
+    def _attempt() -> bool | None:
+        """rename 1회 + 검증. True=반영 / False=미반영 / None=판정 보류."""
+        try:
+            renamed = client.rename_source(notebook_id, source_id, title)
+        except Exception:  # noqa: BLE001 — best-effort
+            logger.warning(
+                "rename_source raised for source %s (title=%r)",
+                source_id,
+                title,
+                exc_info=True,
+            )
+            return False
+        observed = _observed_title()
+        if observed is None:
+            # 조회 실패·목록 미등재라 read-back으로 판정할 수 없다. 이때는 RPC
+            # 반환값이 유일한 신호이므로 그것을 따른다 — 세션486의 falsy 계약 보존
+            # (read-back은 반환값을 *대체*하는 게 아니라 상위 권위로 추가된 것).
+            return True if renamed else False
+        # 관측된 제목이 최종 권위 — truthy 반환이어도 미반영이면 실패로 본다.
+        return observed.strip() == title.strip()
+
+    first = _attempt()
+    if first is not False:
+        return True
+
+    logger.warning(
+        "rename_source reported success but the title did not stick for source "
+        "%s (wanted %r) — retrying after %.1fs (session 540: NLM drops renames "
+        "issued inside the post-add consistency window).",
+        source_id,
+        title,
+        RENAME_VERIFY_RETRY_DELAY_SEC,
+    )
+    if RENAME_VERIFY_RETRY_DELAY_SEC > 0:
+        time.sleep(RENAME_VERIFY_RETRY_DELAY_SEC)
+    second = _attempt()
+    if second is False:
+        logger.warning(
+            "rename_source still not reflected for source %s (wanted %r). The "
+            "NLM title is left bare — run source_rename manually.",
+            source_id,
+            title,
+        )
+        return False
+    return True
 
 
 def add_source(
@@ -259,25 +359,17 @@ def add_source(
             # title_rename_failed 플래그로 관측 (세션486, dead-field 회피 위해 추출 후 주입).
             rename_failed = False
             if title and isinstance(result, dict) and result.get("id"):
-                try:
-                    renamed = client.rename_source(notebook_id, result["id"], title)
-                    if renamed:
+                if title.strip() == _p.name:
+                    # NLM이 add 시 basename을 기본 제목으로 부여하므로 무변경 —
+                    # RPC도 read-back도 불필요 (검증 비용 억제).
+                    result["title"] = title
+                else:
+                    if _rename_source_verified(
+                        client, notebook_id, result["id"], title
+                    ):
                         result["title"] = title
                     else:
                         rename_failed = True
-                        logger.warning(
-                            "rename_source returned falsy for source %s (title=%r)",
-                            result["id"],
-                            title,
-                        )
-                except Exception:  # noqa: BLE001 — best-effort
-                    rename_failed = True
-                    logger.warning(
-                        "rename_source raised for source %s (title=%r)",
-                        result["id"],
-                        title,
-                        exc_info=True,
-                    )
             extracted = _extract_result(result, "file", title or fallback_title)
             if rename_failed:
                 extracted["title_rename_failed"] = True
@@ -1007,7 +1099,16 @@ def replace_source_file(
     mode: Literal["file", "text"] = "text" if use_text_fallback else "file"
     fallback_suffix = " (fallback to text mode)" if use_text_fallback else ""
     atomic_suffix = " (atomic)" if atomic else ""
-    return {
+    # rename 실패 시 메시지에도 명시 — 응답 dict의 필드만으로는 아무도 안 본다는 것이
+    # 세션538~540에서 반복 확인된 실패 모드라, 사람이 읽는 문면에 함께 싣는다.
+    rename_failed = bool(add_res.get("title_rename_failed"))
+    rename_suffix = (
+        " ⚠ 제목 rename 실패 — NLM 제목이 bare 파일명으로 남았을 수 있습니다."
+        " source_rename으로 폴더태그형 제목을 복원하십시오."
+        if rename_failed
+        else ""
+    )
+    result: ReplaceSourceFileResult = {
         "notebook_id": notebook_id,
         "old_source_id": source_id,
         "new_source_id": add_res["source_id"],
@@ -1015,10 +1116,13 @@ def replace_source_file(
         "file_path": str(p),
         "message": (
             f"Replaced source {source_id} with {add_res['source_id']}"
-            f"{fallback_suffix}{atomic_suffix}"
+            f"{fallback_suffix}{atomic_suffix}{rename_suffix}"
         ),
         "mode": mode,
     }
+    if rename_failed:
+        result["title_rename_failed"] = True
+    return result
 
 
 def _match_source_by_basename(
@@ -1046,6 +1150,15 @@ def _match_source_by_basename(
     used even if lower tiers also match. Returns ``(source_id, title)`` on a
     unique match. Raised BEFORE any destructive delete (pre-check safety, same
     contract as the file pre-checks in ``replace_source_file``).
+
+    **Tier 1 demotion (session 540)**: when ``basename`` is in
+    ``DUP_FILENAMES_AUTO_FOLDER_TAG`` *and* a folder-tag match exists for this
+    file, the bare exact match is a foreign residual (convention violation) and
+    tier 1.5 wins instead. Without this, a single bare residual silently
+    hijacks *every* same-basename replace as a confident unique match — not an
+    ambiguity, so fail-close never fires. Session 486's self-healing (adopt the
+    bare source and regenerate its folder tag) is preserved for the case where
+    no folder-tag source exists; both adoption and blocking are logged.
     """
     exact = [s for s in sources if (s.get("title") or "").strip() == basename]
     # Tier 1.5 — folder-tag exact (session 520): disambiguates auto-folder-tag
@@ -1061,7 +1174,45 @@ def _match_source_by_basename(
         s for s in sources
         if (s.get("title") or "").strip().startswith(f"{basename} (")
     ]
-    candidates = exact or folder_exact or prefix
+    # 세션540 — bare-exact 하이재킹 차단: DUP 화이트리스트 파일에 한해 folder_exact를
+    # bare-exact보다 **우선**한다 (신드리 ●●●, 선순위 역전안 채택).
+    #
+    # 문제: `DUP_FILENAMES_AUTO_FOLDER_TAG` 등재 파일은 폴더태그가 규약이라 bare 제목
+    # 소스는 규약 위반 잔재인데, 원래 순서 `exact or folder_exact or prefix`는 bare를
+    # 1순위로 신뢰한다. 잔재 1건이 노트북에 있으면 *어느 스킬의* SKILL.md를 replace하든
+    # len(candidates)==1로 그 잔재에 매칭된다 — 모호가 아니라 "확신에 찬 오매칭"이라
+    # fail-close도 안 걸린다. 세션540 실측: 본관에 bare `SKILL.md`(brokk-debate 구버전)가
+    # 잔존해 SKILL 동기화 전체가 지뢰 위에 있었고, 중복 2쌍이 그 화석이었다.
+    #
+    # 왜 bare 전면 배제가 아닌 선순위 역전인가: 전면 배제는 세션486의 *자가 치유* 계약
+    # (bare 고착 소스를 replace하면 폴더태그가 재생성되어 스스로 낫는다,
+    # `test_replace_bare_stuck_source_regenerates_folder_tag`)을 파괴한다. 회귀가 이를
+    # 반증했다. 이 파일이 *이미 제대로 태그된 소스를 갖고 있다면*(folder_exact 존재)
+    # bare는 명백히 남의 것이므로 배제하고, 태그된 소스가 없으면 종전대로 bare를 흡수해
+    # 치유한다 — 단 그 흡수는 provenance를 증명할 수 없으므로 warning으로 관측한다
+    # (뿌리3 교훈: 발견을 무음으로 흘려보내지 말 것).
+    dup_managed = basename in DUP_FILENAMES_AUTO_FOLDER_TAG
+    bare_residuals = exact if dup_managed else []
+    if dup_managed and exact and folder_exact:
+        logger.warning(
+            "bare-exact hijack blocked for %r: %d bare residual(s) bypassed in "
+            "favour of folder-tag match (residuals: %s). Rename or delete them.",
+            basename,
+            len(exact),
+            [s.get("id") for s in exact],
+        )
+        candidates = folder_exact
+    else:
+        if dup_managed and exact:
+            logger.warning(
+                "adopting bare-titled source %s for %r — no folder-tag source "
+                "exists for this file, so provenance is unverified. Confirm the "
+                "source content belongs to %r.",
+                [s.get("id") for s in exact],
+                basename,
+                str(folder_hint),
+            )
+        candidates = exact or folder_exact or prefix
     if len(candidates) == 1:
         c = candidates[0]
         sid = c.get("id") or ""
@@ -1075,6 +1226,18 @@ def _match_source_by_basename(
         )
         or "(none)"
     )
+    # bare 잔재를 제외한 결과로 실패한 경우, 그 잔재가 진짜 원인이므로 hint에 지목한다
+    # (세션540 — 침묵 하이재킹을 시끄러운 정지로 전환한 대가로 원인 안내가 필수).
+    residual_hint = ""
+    if bare_residuals:
+        residual_repr = ", ".join(
+            f"{{id: {s.get('id')}, title: {s.get('title')!r}}}" for s in bare_residuals
+        )
+        residual_hint = (
+            f" ⚠ 규약 위반 bare 제목 잔재 {len(bare_residuals)}건을 매칭에서 제외했습니다"
+            f" — [{residual_repr}]. 폴더태그형 '{basename} (폴더명)'으로 source_rename"
+            f" 하거나, 중복 구버전이면 source_delete 하십시오."
+        )
     raise ValidationError(
         f"Cannot auto-match source_id for basename {basename!r}: "
         f"{len(candidates)} candidate(s).",
@@ -1082,7 +1245,7 @@ def _match_source_by_basename(
             f"파일명 '{basename}'으로 source_id 자동매칭 실패 "
             f"({len(candidates)}개 후보). source_id를 명시하세요."
         ),
-        hint=f"후보: [{cand_repr}]",
+        hint=f"후보: [{cand_repr}]{residual_hint}",
     )
 
 

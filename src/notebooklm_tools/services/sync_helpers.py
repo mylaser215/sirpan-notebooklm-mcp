@@ -12,6 +12,7 @@ NLM 동기화 본 흐름의 *영구 라이브러리*. ``force_v4_resync.py``의 
 from __future__ import annotations
 
 import glob as _glob
+import hashlib
 import json
 import os
 import re
@@ -135,6 +136,57 @@ NLM_SEED_SKILL_KEYWORDS: dict[str, str] = {
 _VERSION_SUFFIX_RE = re.compile(r"_v\d+(?:\.\d+)*(?=\.\w+$)")
 _KNOWN_EXTS: tuple[str, ...] = (".md", ".py", ".json", ".tsx", ".ts", ".js", ".txt")
 _PROCESSED_TAIL_RE = re.compile(r"\.(py|ts|tsx|json|js|yaml|yml|toml)\.md$")
+
+
+_FM_BLOCK_RE = re.compile(r"\A---\r?\n(.*?)\r?\n---", re.DOTALL)
+
+
+def check_processed_stale(md_path: Path, *, vault_root: Path | None = None) -> str | None:
+    """`.{ext}.md` 가공물의 *내용* stale 판정 (세션540 신설).
+
+    `detect_drift`의 basename 매핑은 소스가 디스크에 *존재하는지*만 보므로, 원본
+    코드가 갱신됐는데 `generate_code_md.py` 재가공을 빠뜨리면 NLM에 구버전이 무음
+    잔존한다 — 층3 구조적 사각(세션533 신드리 지적, 실측 1건 발견·해소).
+    `generate_code_md.py --check`와 같은 판정(FM `original_sha256` vs 현재 원본
+    해시)을 하되, CLI 인자로 원본 경로를 받는 대신 **FM `source_path`에서 스스로
+    되찾아** 스윕이 가능하도록 한다.
+
+    Returns:
+        ``None``  — 가공물이 아니거나 fresh (정상)
+        ``"stale"`` — 원본이 갱신됐는데 재가공 누락
+        ``"origin_missing"`` — FM이 가리키는 원본이 디스크에 없음
+        ``"fm_broken"`` — FM에 source_path/original_sha256이 없음 (규격 이탈)
+    """
+    if not _PROCESSED_TAIL_RE.search(md_path.name):
+        return None
+    try:
+        text = md_path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return "fm_broken"
+    m = _FM_BLOCK_RE.search(text)
+    if not m:
+        return "fm_broken"
+    fields: dict[str, str] = {}
+    for line in m.group(1).splitlines():
+        key, sep, val = line.partition(":")
+        if sep:
+            fields[key.strip()] = val.strip().strip('"').strip("'")
+    src_raw = fields.get("source_path")
+    recorded = fields.get("original_sha256")
+    if not src_raw or not recorded:
+        return "fm_broken"
+    src = Path(src_raw)
+    if not src.is_absolute():
+        # 옛 가공물은 cwd 기준 상대경로일 수 있다 (세션540에 생성기 기본값을 절대경로로
+        # 고정했으나 기존 산출물 호환). 볼트 루트 기준으로 해석 시도.
+        src = (vault_root or get_vault_root()) / src_raw
+    if not src.is_file():
+        return "origin_missing"
+    try:
+        digest = hashlib.sha256(src.read_bytes()).hexdigest()
+    except OSError:
+        return "origin_missing"
+    return None if digest == recorded else "stale"
 
 
 def extract_filename(title: str) -> str:
@@ -300,6 +352,8 @@ class DriftReport(TypedDict):
     matched_non_markdown: list[DriftEntry]  # matched 중 .py/.json/.ts 등 — plain text 정상
     matched_bundle: list[DriftEntry]  # Tier 2 N:1 번들 (registry 매칭) — Batch 3 신설
     bundle_origin_dup: list[DriftEntry]  # 번들 원본이 낱개로 재업로드됨 (세션493 신설)
+    dup_disk_path: list[DriftEntry]  # 서로 다른 소스가 같은 디스크 파일을 가리킴 (세션540 신설)
+    stale_processed: list[DriftEntry]  # `.{ext}.md` 가공물 내용 stale — matched의 파생 뷰 (세션540 신설)
     missing: list[DriftEntry]
     ambiguous: list[DriftEntry]
     skip_type: list[DriftEntry]
@@ -404,7 +458,10 @@ def detect_drift(
             ``030-Configs/시스템환경/nlm_bundle_registry.json``).
 
     Returns:
-        DriftReport — matched/matched_bundle/missing/ambiguous/skip_type 분류 + 카운트.
+        DriftReport — matched/matched_bundle/bundle_origin_dup/dup_disk_path/
+        stale_processed/missing/ambiguous/skip_type 분류 + 카운트.
+        ``dup_disk_path``(세션540)는 disk_path 역방향 유일성 위반(중복 소스),
+        ``stale_processed``(세션540)는 `.{ext}.md` 가공물 내용 stale의 파생 뷰다.
     """
     sources = sources_fetcher(notebook_id)
     matched: list[DriftEntry] = []
@@ -527,8 +584,51 @@ def detect_drift(
                 }
             )
 
+    # disk_path 역방향 유일성 검사 (세션540 신설, 신드리 ●●●).
+    # 위 루프는 source→disk 단방향만 본다. 서로 다른 제목의 소스 2개가 같은 디스크
+    # 파일로 매핑되면 둘 다 각자 len(candidates)==1이라 나란히 matched로 통과하고,
+    # 중복은 "N matched" 총계 안에 영구 은폐된다 — 잔재도 모호도 아니므로 어떤
+    # 버킷도 울리지 않는다. 세션540 실증: `SKILL.md (suno-lyric-refine)`와
+    # `suno-lyric-refine/SKILL.md`(기각된 슬래시형 잔재)가 같은 파일을 가리키며
+    # 공존했고, 그날 drift는 "잔재 0"으로 깨끗하게 보고했다. 그 깨끗함이 곧 사각의
+    # 증거였다. bundle_origin_dup(세션493)과 동일한 사후 감지 패턴.
+    dup_disk_path: list[DriftEntry] = []
+    by_disk: dict[str, list[DriftEntry]] = {}
+    for m in matched:
+        disk_path = m.get("disk_path")
+        if disk_path:
+            by_disk.setdefault(disk_path.lower(), []).append(m)
+    for group in by_disk.values():
+        if len(group) > 1:
+            for entry in group:
+                entry["status"] = "dup_disk_path"
+                entry["markdown_relevant"] = False
+                dup_disk_path.append(entry)
+    if dup_disk_path:
+        dup_ids = {e["source_id"] for e in dup_disk_path}
+        matched = [m for m in matched if m["source_id"] not in dup_ids]
+
     matched_markdown = [m for m in matched if m["markdown_relevant"]]
     matched_non_markdown = [m for m in matched if not m["markdown_relevant"]]
+
+    # 층3 — 가공물 *내용* stale 스윕 (세션540 신설, 신드리 ●●○ Q4).
+    # 기존 검사는 "디스크에 파일이 있는가"만 봐서 원본 갱신 후 재가공 누락을 구조적으로
+    # 못 봤다. 여기서 FM `original_sha256`을 현재 원본 해시와 대조해 그 사각을 닫는다.
+    # 파생 뷰이므로 matched에서 빼지 않는다 — 기존 카운트 계약(matched/markdown 분리)을
+    # 건드리지 않고 경고만 추가. NLM 호출 0, 로컬 해시 대조뿐이라 비용은 무시 가능.
+    # 처방 형태가 헌법 조항 +1이 아니라 *이미 매 동기화에 호출되는 코드로의 편입*인
+    # 이유: 뿌리4 결론("코드가 검사·주입하는 형태만 생존 실적이 있다") + 세션538
+    # `--list-dangling` 전례.
+    stale_processed: list[DriftEntry] = []
+    for m in matched:
+        disk_path = m.get("disk_path")
+        if not disk_path:
+            continue
+        verdict = check_processed_stale(Path(disk_path), vault_root=vault_root)
+        if verdict is not None:
+            entry = dict(m)
+            entry["status"] = verdict
+            stale_processed.append(entry)  # type: ignore[arg-type]
 
     return {
         "notebook_id": notebook_id,
@@ -538,6 +638,8 @@ def detect_drift(
         "matched_non_markdown": matched_non_markdown,
         "matched_bundle": matched_bundle,
         "bundle_origin_dup": bundle_origin_dup,
+        "dup_disk_path": dup_disk_path,
+        "stale_processed": stale_processed,
         "missing": missing,
         "ambiguous": ambiguous,
         "skip_type": skip_type,
@@ -554,6 +656,8 @@ def format_drift_summary(report: DriftReport) -> str:
     mn = len(report["matched_non_markdown"])
     mb = len(report.get("matched_bundle", []))
     bod = len(report.get("bundle_origin_dup", []))
+    ddp = len(report.get("dup_disk_path", []))
+    sp = len(report.get("stale_processed", []))
     ms = len(report["missing"])
     a = len(report["ambiguous"])
     st = len(report["skip_type"])
@@ -561,11 +665,37 @@ def format_drift_summary(report: DriftReport) -> str:
         f"📊 drift 점검: {mm} markdown(.md) / {mn} non-md(plain text 정상)"
         f" / {mb} 번들(N:1)"
         f" / {bod} 번들원본 낱개중복"
+        f" / {ddp} 동일파일 중복소스"
+        f" / {sp} 가공물 내용 stale"
         f" / {ms} NLM 잔재 / {a} 모호 / {st} type-skip"
     ]
-    if ms > 0 or a > 0 or bod > 0:
+    if ms > 0 or a > 0 or bod > 0 or ddp > 0 or sp > 0:
         parts.append(" — 청소·매핑 보강 권고")
     summary = "".join(parts)
+    if sp > 0:
+        summary += (
+            "\n  🟠 가공물 내용 stale (원본 갱신 후 재가공 누락 — NLM에 구버전 잔존."
+            " `generate_code_md.py <원본> --force` 후 재업로드 권고):"
+        )
+        for entry in report["stale_processed"][:10]:
+            summary += (
+                f"\n    - [{entry['source_id'][:8]}] {entry['title'][:60]}"
+                f" ({entry['status']})"
+            )
+        if sp > 10:
+            summary += f"\n    ... +{sp - 10} more"
+    if ddp > 0:
+        summary += (
+            "\n  🔴 동일 디스크 파일을 가리키는 중복 소스 (제목만 다름 — 구버전"
+            " 잔재일 가능성. 내용 확인 후 규약 위반 쪽 source_delete 권고):"
+        )
+        for entry in report["dup_disk_path"][:10]:
+            summary += (
+                f"\n    - [{entry['source_id'][:8]}] {entry['title'][:60]}"
+                f" → {entry['disk_path']}"
+            )
+        if ddp > 10:
+            summary += f"\n    ... +{ddp - 10} more"
     if bod > 0:
         summary += (
             "\n  🔴 번들원본 낱개중복 (registry 등재 원본이 번들 아닌 낱개로 재업로드"

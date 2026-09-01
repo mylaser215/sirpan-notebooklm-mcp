@@ -4,6 +4,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from notebooklm_tools.services import sources as sources_service
 from notebooklm_tools.services.errors import ServiceError, ValidationError
 from notebooklm_tools.services.sources import (
     VALID_SOURCE_TYPES,
@@ -19,6 +20,16 @@ from notebooklm_tools.services.sources import (
     sync_drive_sources,
     validate_source_type,
 )
+
+
+@pytest.fixture(autouse=True)
+def _no_rename_retry_sleep(monkeypatch):
+    """세션540 — rename read-back 재시도의 실 대기(3s)를 유닛에서 제거.
+
+    프로덕션 지연은 NLM eventual consistency 창을 넘기기 위한 것이라 값 자체가
+    계약이 아니다. 재시도 *횟수*와 판정 로직은 그대로 검증된다.
+    """
+    monkeypatch.setattr(sources_service, "RENAME_VERIFY_RETRY_DELAY_SEC", 0)
 
 
 @pytest.fixture
@@ -182,6 +193,70 @@ class TestAddSource:
         # rename RPC가 재생성된 폴더태그로 호출됨
         assert mock_client.rename_source.call_args[0][2] == expected
         assert result["title"] == expected
+
+    # --- rename 거짓 성공 → read-back 검증 (세션540 라이브 실측) ----------------
+
+    def test_file_rename_false_success_caught_by_readback(self, mock_client, tmp_path):
+        """rename RPC가 **성공을 반환하고도** 제목이 안 붙는 경우를 read-back이 잡는다.
+
+        세션540 라이브: add 직후 rename은 정상 응답하고 서버 로그에 경고 하나 없는데,
+        13분 뒤 소스 목록의 제목은 bare 그대로였다. 실패가 아니라 *거짓 성공*이라
+        반환값 기반 신호(`title_rename_failed`)로는 원천적으로 못 잡는다. 이것이
+        세션525·529가 매 동기화마다 수동 source_rename을 반복하던 현상의 정체다.
+        """
+        skill_dir = tmp_path / "brokk-debate"
+        skill_dir.mkdir()
+        fp = skill_dir / "SKILL.md"
+        mock_client.add_file.return_value = {"id": "src-new", "title": "SKILL.md"}
+        mock_client.rename_source.return_value = True  # 성공을 반환하지만
+        # NLM이 실제로는 제목을 버려 목록엔 계속 bare로 보인다
+        mock_client.get_notebook_sources_with_types.return_value = [
+            {"id": "src-new", "title": "SKILL.md", "source_type_name": "Text"},
+        ]
+
+        result = add_source(
+            mock_client, "nb-1", "file", file_path=str(fp), title="SKILL.md"
+        )
+
+        assert result.get("title_rename_failed") is True
+        # 1회 재시도까지 수행 (총 2회 rename)
+        assert mock_client.rename_source.call_count == 2
+
+    def test_file_rename_sticks_on_retry_clears_flag(self, mock_client, tmp_path):
+        """재시도에서 반영되면 플래그 없음 — 검출기가 상시 발화하지 않음을 고정."""
+        skill_dir = tmp_path / "brokk-debate"
+        skill_dir.mkdir()
+        fp = skill_dir / "SKILL.md"
+        tagged = "SKILL.md (brokk-debate)"
+        mock_client.add_file.return_value = {"id": "src-new", "title": "SKILL.md"}
+        mock_client.rename_source.return_value = True
+        mock_client.get_notebook_sources_with_types.side_effect = [
+            [{"id": "src-new", "title": "SKILL.md", "source_type_name": "Text"}],
+            [{"id": "src-new", "title": tagged, "source_type_name": "Text"}],
+        ]
+
+        result = add_source(
+            mock_client, "nb-1", "file", file_path=str(fp), title="SKILL.md"
+        )
+
+        assert result.get("title_rename_failed") is None
+        assert result["title"] == tagged
+        assert mock_client.rename_source.call_count == 2
+
+    def test_file_title_equal_to_basename_skips_rename_rpc(self, mock_client, tmp_path):
+        """제목이 basename과 같으면 NLM 기본값과 동일 → rename·read-back 모두 생략.
+
+        검증 비용이 *제목을 진짜 바꾸는* 경우에만 발생함을 고정 (동기화 지연 방어).
+        """
+        fp = tmp_path / "guide.md"
+        mock_client.add_file.return_value = {"id": "src-new", "title": "guide.md"}
+
+        result = add_source(
+            mock_client, "nb-1", "file", file_path=str(fp), title="guide.md"
+        )
+
+        mock_client.rename_source.assert_not_called()
+        assert result["title"] == "guide.md"
 
     def test_file_folder_tag_title_preserved(self, mock_client, tmp_path):
         """이미 폴더태그인 title(`SKILL.md (two_step_solver)`)은 재생성 스킵 → preserve."""
@@ -721,6 +796,68 @@ class TestReplaceSourceFile:
         expected = f"SKILL.md ({fp.parent.name})"
         assert mock_client.rename_source.call_args[0][2] == expected
         assert result["title"] == expected
+
+    def test_bare_exact_does_not_hijack_when_folder_tag_exists(
+        self, mock_client, tmp_path
+    ):
+        """세션540 — 남의 bare 잔재가 내 폴더태그 소스를 하이재킹하지 못한다.
+
+        실 사고: 본관에 bare `SKILL.md`(brokk-debate 구버전 잔재)가 있는 동안
+        `exact or folder_exact or prefix` 순서가 bare를 1순위로 신뢰해, *어느 스킬의*
+        SKILL.md를 replace하든 len(candidates)==1로 그 잔재에 매칭됐다. 모호가 아니라
+        "확신에 찬 오매칭"이라 fail-close도 안 걸리는 무음 경로였다.
+        """
+        skill_dir = tmp_path / "brokk-debate"
+        skill_dir.mkdir()
+        fp = skill_dir / "SKILL.md"
+        fp.write_text("content")
+
+        mock_client.get_notebook_sources_with_types.return_value = [
+            # 남의 규약 위반 잔재 (bare)
+            {"id": "src-foreign", "title": "SKILL.md", "source_type_name": "Text"},
+            # 이 파일의 정본 (폴더태그형)
+            {
+                "id": "src-mine",
+                "title": "SKILL.md (brokk-debate)",
+                "source_type_name": "Text",
+            },
+        ]
+        mock_client.add_file.return_value = {
+            "id": "src-new",
+            "title": "SKILL.md",
+        }
+
+        result = replace_source_file(mock_client, "nb-1", str(fp))
+
+        # 폴더태그 정본이 교체 대상 — bare 잔재는 건드리지 않는다
+        assert result["old_source_id"] == "src-mine"
+        # 파괴 대상이 정본 1건뿐 — 남의 bare 잔재는 삭제되지 않는다
+        deleted = str(mock_client.delete_source.call_args)
+        assert "src-mine" in deleted
+        assert "src-foreign" not in deleted
+        # 제목도 폴더태그형으로 승계
+        assert result["title"] == "SKILL.md (brokk-debate)"
+
+    def test_bare_exact_still_adopted_when_no_folder_tag(self, mock_client, tmp_path):
+        """세션540 — folder_exact가 없으면 세션486 자가 치유는 그대로 살아 있다.
+
+        선순위 역전을 'bare 전면 배제'로 과교정하면 486 계약이 깨진다(회귀가 반증함).
+        경계가 정확히 folder_exact 존재 여부임을 고정한다.
+        """
+        skill_dir = tmp_path / "brokk-debate"
+        skill_dir.mkdir()
+        fp = skill_dir / "SKILL.md"
+        fp.write_text("content")
+
+        mock_client.get_notebook_sources_with_types.return_value = [
+            {"id": "src-stuck", "title": "SKILL.md", "source_type_name": "Text"},
+        ]
+        mock_client.add_file.return_value = {"id": "src-new", "title": "SKILL.md"}
+
+        result = replace_source_file(mock_client, "nb-1", str(fp))
+
+        assert result["old_source_id"] == "src-stuck"
+        assert result["title"] == "SKILL.md (brokk-debate)"
 
     def test_auto_match_ambiguous_raises_before_delete(self, mock_client, tmp_path):
         """동일 basename 다수(ambiguous) → ValidationError, 파괴적 delete 미발동."""
