@@ -135,7 +135,7 @@ NLM_SEED_SKILL_KEYWORDS: dict[str, str] = {
 
 _VERSION_SUFFIX_RE = re.compile(r"_v\d+(?:\.\d+)*(?=\.\w+$)")
 _KNOWN_EXTS: tuple[str, ...] = (".md", ".py", ".json", ".tsx", ".ts", ".js", ".txt")
-_PROCESSED_TAIL_RE = re.compile(r"\.(py|ts|tsx|json|js|yaml|yml|toml)\.md$")
+_PROCESSED_TAIL_RE = re.compile(r"\.(py|ts|tsx|json|js|sh|yaml|yml|toml)\.md$")
 
 
 _FM_BLOCK_RE = re.compile(r"\A---\r?\n(.*?)\r?\n---", re.DOTALL)

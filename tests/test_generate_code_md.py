@@ -52,6 +52,7 @@ def _run(*args: str) -> subprocess.CompletedProcess[str]:
         ("sample_python.py", "expected_python.py.md"),
         ("sample_typescript.ts", "expected_typescript.ts.md"),
         ("sample_tsx.tsx", "expected_tsx.tsx.md"),
+        ("sample_shell.sh", "expected_shell.sh.md"),
     ],
 )
 def test_output_equivalence(tmp_path: Path, sample: str, expected: str) -> None:

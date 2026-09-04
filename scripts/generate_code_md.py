@@ -368,6 +368,34 @@ def _render_kt(parsed: dict) -> list[str]:
 
 
 # ---------------------------------------------------------------------------
+# Shell: regex 기반 추출 (TS/Kotlin과 _parse_flat/_render_flat 공유) + flat 심볼
+# ---------------------------------------------------------------------------
+
+# Declaration keywords that may precede a top-level assignment, plus their
+# optional flag words (`declare -A FOO=`). Matches at column 0.
+_SH_MODS = r"(?:(?:readonly|declare|typeset|export|local)\s+(?:-[A-Za-z]+\s+)*)*"
+
+# Top-level shell symbol extractors. Both `function` forms precede the bare
+# `name()` form, and all function patterns precede `variable` so a collision on
+# (name, line) keeps the more specific kind under _parse_flat's dedup.
+SH_SYMBOL_PATTERNS: list[tuple[str, re.Pattern[str]]] = [
+    ("function", re.compile(r"^function\s+(\w+)\s*(?:\(\s*\))?\s*\{", re.MULTILINE)),
+    ("function", re.compile(r"^(\w+)\s*\(\s*\)\s*\{", re.MULTILINE)),
+    ("variable", re.compile(r"^" + _SH_MODS + r"([A-Za-z_]\w*)=", re.MULTILINE)),
+]
+
+
+def _parse_sh(path: Path) -> dict:
+    """Extract top-level shell symbols via regex."""
+    return _parse_flat(path, SH_SYMBOL_PATTERNS)
+
+
+def _render_sh(parsed: dict) -> list[str]:
+    """Render the language-specific middle section + source fence for shell."""
+    return _render_flat(parsed, "bash")
+
+
+# ---------------------------------------------------------------------------
 # JSON: 키 구조 추출 (top-level keys + 값 타입/요약) + 원본 fence
 # ---------------------------------------------------------------------------
 
@@ -500,6 +528,7 @@ PARSERS: dict[str, tuple[Parser, Renderer]] = {
     ".ts": (_parse_ts, _render_ts),
     ".tsx": (_parse_ts, _render_ts),
     ".kt": (_parse_kt, _render_kt),
+    ".sh": (_parse_sh, _render_sh),
     ".json": (_parse_json, _render_json),
 }
 
