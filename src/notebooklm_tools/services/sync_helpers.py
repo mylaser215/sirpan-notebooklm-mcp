@@ -18,7 +18,7 @@ import os
 import re
 import subprocess
 from collections.abc import Callable
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any, TypedDict
 
 # 기본값: 현 사용자 환경. 다른 사용자는 SIRPAN_VAULT 환경변수로 override.
@@ -337,7 +337,7 @@ class DriftEntry(TypedDict, total=False):
     source_id: str
     title: str
     type_name: str
-    status: str  # "matched" | "missing" | "ambiguous" | "skip_type" | "matched_bundle"
+    status: str  # "matched" | "missing" | "ambiguous" | "skip_type" | "matched_bundle" | "unprocessed_r5"
     disk_path: str | None
     candidates: list[str]
     markdown_relevant: bool  # True 면 .md → markdown 파서 라우팅 적용 대상 (v4 결함 학습)
@@ -354,9 +354,134 @@ class DriftReport(TypedDict):
     bundle_origin_dup: list[DriftEntry]  # 번들 원본이 낱개로 재업로드됨 (세션493 신설)
     dup_disk_path: list[DriftEntry]  # 서로 다른 소스가 같은 디스크 파일을 가리킴 (세션540 신설)
     stale_processed: list[DriftEntry]  # `.{ext}.md` 가공물 내용 stale — matched의 파생 뷰 (세션540 신설)
+    unprocessed_r5: list[DriftEntry]  # nlm-tier=R5 선언인데 NLM 미도달 (disk→source, 세션559 신설)
+    untiered_count: int  # nlm-tier 선언조차 없는 코드파일 수 — 판정 누락 지표 (세션559 신설)
     missing: list[DriftEntry]
     ambiguous: list[DriftEntry]
     skip_type: list[DriftEntry]
+
+
+# ---------------------------------------------------------------------------
+# disk→source 역방향 스윕 — `.gitattributes` nlm-tier 선언 기반 (세션559 신설)
+# ---------------------------------------------------------------------------
+#
+# 위 버킷들은 전부 **source→disk** 단방향이다(NLM 소스를 순회하며 디스크를 찾는다).
+# 그래서 *디스크에만 있고 NLM에 아예 올라간 적 없는* 코어 파일은 어떤 버킷도 울리지
+# 않는다 — 세션559 실측에서 그런 파일이 13건 나왔고, `handoff_push.py` 는 변경 목록에
+# 최소 두 번(세션403 볼트 편입·세션558 동기화 창) 떴는데도 매번 지나쳐졌다.
+#
+# 진짜 사각은 증분 diff 가 아니라 **R5/R6 판정이 매 동기화 LLM 재량이고 그 판정이
+# 어디에도 기록되지 않는 것**이었다. "R6 로 봤다"와 "안 봤다"가 구분되지 않으니 다음
+# 세션이 같은 판단을 처음부터 다시 하고 같은 결과가 나온다. 훅 폴더 가공률이 고르게
+# 낮았던 것(`claude/hooks` 4/7 · `sirpan-tools/hooks` 4/7 · `git-templates` 1/5)이
+# 한 파일의 실수가 아닌 계열 현상이라는 정량 증거다.
+#
+# 처방은 판정을 `.gitattributes` 속성으로 **파일 곁에 기록**하고 여기서 대조하는 것.
+# 형태가 헌법 조항 +1 이 아니라 *이미 매 동기화에 호출되는 코드로의 편입*인 이유는
+# `stale_processed`(세션540)와 같다 — 코드가 검사하는 형태만 생존 실적이 있다.
+
+# ``untiered`` 집계에서 뺄 디렉토리. 위 SKIP_DIRS(source→disk 매핑용)와 별개다 —
+# 여기서 거르는 것은 *판정이 필요 없는* 코드다: 테스트는 코어의 검증물이지 코어가
+# 아니고, ``_archive`` 는 이미 은퇴했다.
+_TIER_SCAN_SKIP_DIRS: frozenset[str] = frozenset({"tests", "_archive", ".obsidian"})
+_TIER_SCAN_EXTS: tuple[str, ...] = (".py", ".sh")
+_TIER_ATTR_R5_SUFFIX = ": nlm-tier: R5"
+_TIER_ATTR_UNSPEC_SUFFIX = ": nlm-tier: unspecified"
+
+
+def _git_lines(
+    vault_root: Path, args: list[str], *, stdin: str | None = None
+) -> list[str] | None:
+    """볼트에서 git 1회 실행 → stdout 줄 리스트. 실패 시 ``None`` (fail-open).
+
+    ``core.quotePath=false`` 를 명시하는 이유: 기본값이면 한글 경로가
+    ``"000-\\354\\213\\234..."`` 처럼 8진 이스케이프된 채 따옴표로 감싸여 나와
+    ``Path`` 조립이 통째로 깨진다. 이 볼트는 경로 대부분이 한글이다.
+
+    ⚠ **bytes 모드가 필수다.** ``text=True`` 로 두면 Windows 에서 stdin 을 쓸 때
+    ``\\n`` 이 ``\\r\\n`` 으로 변환되어(``universal_newlines`` 의 write 쪽 동작),
+    ``check-attr --stdin`` 이 경로 끝의 ``\\r`` 까지 **파일명의 일부로** 읽는다.
+    그러면 대부분의 경로가 매칭에 실패해 조용히 ``unspecified`` 로 떨어지고,
+    끝이 ``*`` 인 glob 선언만 우연히 살아남는다 — 세션559 로컬 검증 실측:
+    R5 54건이 **5건**으로 줄고 그 5건은 경로에 ``\\r`` 과 따옴표를 달고 나왔다
+    (git 이 제어문자 포함 경로로 보아 quotePath 를 되살린 파생 증상).
+    조용히 *적게* 검출되는 실패라 프로덕션에서 발견하기 어렵다.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-c", "core.quotePath=false", *args],
+            cwd=str(vault_root),
+            input=stdin.encode("utf-8") if stdin is not None else None,
+            capture_output=True,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if proc.returncode != 0:
+        return None
+    return proc.stdout.decode("utf-8", errors="replace").splitlines()
+
+
+def scan_unprocessed_r5(
+    vault_root: Path, reached: set[str]
+) -> tuple[list[DriftEntry], int]:
+    """``nlm-tier=R5`` 선언 파일 중 NLM 미도달 + 미선언 코드파일 수.
+
+    Args:
+        vault_root: 볼트 루트.
+        reached: NLM 에 도달한 디스크 경로 집합 (``resolve()`` 후 소문자).
+            도달 경로는 셋이다 — ⓐ raw 그대로 소스가 된 것 ⓑ ``{원본}.md`` 가공물이
+            소스가 된 것 ⓒ Tier 2 번들 원본으로 등재된 것. ⓑ 때문에 원본 경로만으로는
+            판정할 수 없어 ``+ ".md"`` 를 함께 조회한다.
+
+    Returns:
+        ``(unprocessed_r5 엔트리, untiered 코드파일 수)``.
+        git 을 못 부르면 ``([], 0)`` — **fail-open**. 이 스윕은 경고 생성기일 뿐이라
+        조용히 비는 편이, git 부재 환경(테스트·CI)에서 예외로 동기화 전체를 세우는
+        것보다 낫다. 반대로 *잘못된 경고*는 사람을 무디게 만드므로 파싱은 엄격하다.
+    """
+    tracked = _git_lines(vault_root, ["ls-files"])
+    if tracked is None or not tracked:
+        return [], 0
+    attr_lines = _git_lines(
+        vault_root, ["check-attr", "nlm-tier", "--stdin"], stdin="\n".join(tracked)
+    )
+    if attr_lines is None:
+        return [], 0
+
+    unprocessed: list[DriftEntry] = []
+    untiered = 0
+    for line in attr_lines:
+        if line.endswith(_TIER_ATTR_R5_SUFFIX):
+            rel = line[: -len(_TIER_ATTR_R5_SUFFIX)]
+            abs_path = vault_root / rel
+            try:
+                key = str(abs_path.resolve()).lower()
+            except OSError:
+                key = str(abs_path).lower()
+            if key in reached or f"{key}.md" in reached:
+                continue
+            unprocessed.append(
+                {
+                    "source_id": "",
+                    "title": rel,
+                    "type_name": "",
+                    "status": "unprocessed_r5",
+                    "disk_path": str(abs_path),
+                    "candidates": [],
+                    "markdown_relevant": False,
+                }
+            )
+        elif line.endswith(_TIER_ATTR_UNSPEC_SUFFIX):
+            rel = line[: -len(_TIER_ATTR_UNSPEC_SUFFIX)]
+            if not rel.endswith(_TIER_SCAN_EXTS):
+                continue
+            parts = PurePosixPath(rel).parts
+            if any(d in _TIER_SCAN_SKIP_DIRS for d in parts):
+                continue
+            if parts[-1].startswith("test_"):
+                continue
+            untiered += 1
+    return unprocessed, untiered
 
 
 # ---------------------------------------------------------------------------
@@ -630,6 +755,22 @@ def detect_drift(
             entry["status"] = verdict
             stale_processed.append(entry)  # type: ignore[arg-type]
 
+    # 층4 — disk→source 역방향 스윕 (세션559 신설). 위 전부가 source→disk 단방향이라
+    # *NLM에 올라간 적 없는* 코어 파일은 어떤 버킷도 울리지 않던 사각을 닫는다.
+    # 도달 집합은 registry 번들 원본(이미 resolve+lower) + 매핑된 모든 disk_path.
+    reached: set[str] = set(bundle_origins_all)
+    for _e in (*matched, *matched_bundle, *dup_disk_path, *bundle_origin_dup, *missing):
+        _dp = _e.get("disk_path")
+        if not _dp:
+            continue
+        try:
+            reached.add(str(Path(_dp).resolve()).lower())
+        except OSError:
+            reached.add(str(_dp).lower())
+    unprocessed_r5, untiered_count = scan_unprocessed_r5(
+        vault_root or get_vault_root(), reached
+    )
+
     return {
         "notebook_id": notebook_id,
         "total": len(sources),
@@ -640,6 +781,8 @@ def detect_drift(
         "bundle_origin_dup": bundle_origin_dup,
         "dup_disk_path": dup_disk_path,
         "stale_processed": stale_processed,
+        "unprocessed_r5": unprocessed_r5,
+        "untiered_count": untiered_count,
         "missing": missing,
         "ambiguous": ambiguous,
         "skip_type": skip_type,
@@ -658,6 +801,8 @@ def format_drift_summary(report: DriftReport) -> str:
     bod = len(report.get("bundle_origin_dup", []))
     ddp = len(report.get("dup_disk_path", []))
     sp = len(report.get("stale_processed", []))
+    up = len(report.get("unprocessed_r5", []))
+    ut = report.get("untiered_count", 0)
     ms = len(report["missing"])
     a = len(report["ambiguous"])
     st = len(report["skip_type"])
@@ -667,11 +812,22 @@ def format_drift_summary(report: DriftReport) -> str:
         f" / {bod} 번들원본 낱개중복"
         f" / {ddp} 동일파일 중복소스"
         f" / {sp} 가공물 내용 stale"
+        f" / {up} R5 미편입"
         f" / {ms} NLM 잔재 / {a} 모호 / {st} type-skip"
+        f" (nlm-tier 미선언 코드 {ut})"
     ]
-    if ms > 0 or a > 0 or bod > 0 or ddp > 0 or sp > 0:
+    if ms > 0 or a > 0 or bod > 0 or ddp > 0 or sp > 0 or up > 0:
         parts.append(" — 청소·매핑 보강 권고")
     summary = "".join(parts)
+    if up > 0:
+        summary += (
+            "\n  🟡 R5 선언인데 NLM 미편입 (`.gitattributes` nlm-tier=R5 인데 본관에"
+            " 소스가 없음 — 가공 후 업로드하거나, 코어가 아니면 선언을 R6 로 정정):"
+        )
+        for entry in report["unprocessed_r5"][:15]:
+            summary += f"\n    - {entry['title']}"
+        if up > 15:
+            summary += f"\n    ... +{up - 15} more"
     if sp > 0:
         summary += (
             "\n  🟠 가공물 내용 stale (원본 갱신 후 재가공 누락 — NLM에 구버전 잔존."
