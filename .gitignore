@@ -107,3 +107,15 @@ uv.lock
 
 # 임시 캡쳐 분석 자료 (NLM 웹 baseline raw text — baseline은 회귀 테스트에 박제됨)
 .tmp_raw_captures/
+# ── SIR-PAN 공통 시크릿 바닥 (audit_workdir.py --fix) ──
+.env
+.env.*
+!.env.example
+!.env.*.example
+cookies.json
+auth.json
+*.pem
+*.jks
+keystore.properties
+*serviceAccount*.json
+firebase-adminsdk-*.json
